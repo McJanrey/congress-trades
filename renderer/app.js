@@ -975,6 +975,8 @@ async function refreshPortfolio() {
       ],
     },
     options: {
+      responsive: true,
+      maintainAspectRatio: false, // fill the 340px container width and height
       plugins: { legend: { labels: { color: '#c5cad6' } } },
       scales: {
         x: { ticks: { color: '#6b7280', maxTicksLimit: 10 }, grid: { color: '#1f2230' } },
