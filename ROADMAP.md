@@ -21,13 +21,11 @@ picks, TFSA tracker with buy sizing, self-updating via GitHub releases.
 
 ## v0.5 — Signal quality (the moat)
 
-- [ ] **Backtest the picks score** — replay 2024–2025 trades against price history and
-      measure whether the score actually predicts excess returns. Tune weights with data,
-      not vibes. *Do this before scaling real money.*
-- [ ] **Committee relevance** — flag trades where the member's committee oversees the
-      stock's sector (Armed Services → defense, Energy → oil). Rosters are in the
-      unitedstates/congress-legislators dataset. This is the "geopolitics" signal in
-      data form.
+- [x] **Backtest the picks score** — done (backtest.js + backtest-experiments.js).
+      Verdict: generic copy-trading does NOT beat costs; committee-relevant trades
+      returned +2.45%/trade EV vs +0.17% baseline; HASC defense buys 12/12 to +5%.
+- [x] **Committee relevance** — shipped in v0.4.0: 🏛 badge, +5 score boost, dedicated
+      notification on fresh committee-relevant filings.
 - [ ] **Sell alerts for held positions** — if anyone in Congress sells a ticker that's in
       My TFSA, banner + notification immediately. Exit signal matters more than entry.
 - [ ] Late-filer weighting — discount members who chronically file near the 45-day limit;
