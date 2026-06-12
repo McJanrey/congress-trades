@@ -219,6 +219,11 @@ app.whenReady().then(() => {
     autoUpdater.on('update-downloaded', (info) => {
       send('update-ready', { version: info.version });
     });
+    autoUpdater.on('error', (e) => {
+      send('update-error', { message: e?.message || 'update failed' });
+    });
+    // Unsigned builds sometimes fail differential updates — force full download.
+    autoUpdater.disableDifferentialDownload = true;
     autoUpdater.checkForUpdates().catch(() => {});
     setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 3600_000);
   }

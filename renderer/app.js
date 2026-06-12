@@ -886,6 +886,19 @@ if (api.onUpdateAvailable) {
     updAction.onclick = () => api.updateInstall();
     updBanner.classList.remove('hidden');
   });
+  if (api.onUpdateError) {
+    api.onUpdateError((info) => {
+      updText.textContent = `Update failed: ${info.message.slice(0, 60)}`;
+      updAction.disabled = false;
+      updAction.textContent = 'Retry';
+      updAction.onclick = () => {
+        api.updateDownload();
+        updAction.disabled = true;
+        updAction.textContent = 'Downloading…';
+      };
+      updBanner.classList.remove('hidden');
+    });
+  }
   $('#update-dismiss').addEventListener('click', () => updBanner.classList.add('hidden'));
 }
 
