@@ -21,4 +21,9 @@ contextBridge.exposeInMainWorld('api', {
   portfolioValue: () => ipcRenderer.invoke('portfolio-value'),
   computePicks: (opts) => ipcRenderer.invoke('compute-picks', opts),
   fxRate: () => ipcRenderer.invoke('fx-rate'),
+  updateDownload: () => ipcRenderer.invoke('update-download'),
+  updateInstall: () => ipcRenderer.invoke('update-install'),
+  onUpdateAvailable: (cb) => ipcRenderer.on('update-available', (_e, info) => cb(info)),
+  onUpdateProgress: (cb) => ipcRenderer.on('update-progress', (_e, p) => cb(p)),
+  onUpdateReady: (cb) => ipcRenderer.on('update-ready', (_e, info) => cb(info)),
 });

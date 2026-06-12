@@ -860,6 +860,35 @@ async function refreshPortfolio() {
   });
 }
 
+// ---------- App updates (user-consent flow) ----------
+const updBanner = $('#update-banner');
+const updText = $('#update-text');
+const updAction = $('#update-action');
+
+if (api.onUpdateAvailable) {
+  api.onUpdateAvailable((info) => {
+    updText.textContent = `Update v${info.version} available`;
+    updAction.textContent = 'Download';
+    updAction.onclick = () => {
+      api.updateDownload();
+      updAction.disabled = true;
+      updAction.textContent = 'Downloading…';
+    };
+    updBanner.classList.remove('hidden');
+  });
+  api.onUpdateProgress((p) => {
+    updAction.textContent = `Downloading… ${p.percent}%`;
+  });
+  api.onUpdateReady((info) => {
+    updText.textContent = `v${info.version} ready to install`;
+    updAction.disabled = false;
+    updAction.textContent = 'Restart & install';
+    updAction.onclick = () => api.updateInstall();
+    updBanner.classList.remove('hidden');
+  });
+  $('#update-dismiss').addEventListener('click', () => updBanner.classList.add('hidden'));
+}
+
 // Boot: load data, then kick off background computations. Periodic re-check
 // keeps prices fresh while the app sits open (computes are disk-cached, so
 // repeats are cheap).

@@ -100,6 +100,15 @@ button.copy-btn {
 button.copy-btn:hover { background: #232737; color: #e6e8ee; border-color: #3a82f7; }
 button.copy-btn.disabled { opacity: 0.3; cursor: not-allowed; }
 
+.update-banner {
+  position: fixed; top: 56px; right: 18px; z-index: 150;
+  display: flex; align-items: center; gap: 10px;
+  background: #14161f; border: 1px solid #3a82f7; border-radius: 8px;
+  padding: 10px 14px; font-size: 13px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+.update-banner button { padding: 5px 12px; font-size: 12px; }
+
 .toast {
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
   background: #14161f; border: 1px solid #3a82f7; color: #e6e8ee;

@@ -166,16 +166,26 @@ app.whenReady().then(() => {
   }
   scheduleAutoRefresh();
 
-  // Self-update from GitHub releases: check on launch, then every 4 hours.
-  // Downloads in the background, notifies, installs on app quit.
+  // Self-update from GitHub releases — user-consent flow like a typical app:
+  // check quietly, then ask in-app before downloading or installing anything.
   if (app.isPackaged) {
-    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
-    setInterval(() => autoUpdater.checkForUpdatesAndNotify().catch(() => {}), 4 * 3600_000);
-    autoUpdater.on('update-downloaded', (info) => {
-      send('refresh-progress', { type: 'status', text: `Update v${info.version} downloaded — restarts on next quit.` });
+    autoUpdater.autoDownload = false;
+    autoUpdater.on('update-available', (info) => {
+      send('update-available', { version: info.version, notes: info.releaseNotes || '' });
     });
+    autoUpdater.on('download-progress', (p) => {
+      send('update-progress', { percent: Math.round(p.percent) });
+    });
+    autoUpdater.on('update-downloaded', (info) => {
+      send('update-ready', { version: info.version });
+    });
+    autoUpdater.checkForUpdates().catch(() => {});
+    setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 3600_000);
   }
 });
+
+ipcMain.handle('update-download', () => { autoUpdater.downloadUpdate().catch(() => {}); });
+ipcMain.handle('update-install', () => { autoUpdater.quitAndInstall(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
