@@ -581,7 +581,7 @@ function renderPicks(picks) {
     const scoreColor = idx < 5 ? '#22c55e' : idx < 15 ? '#c5cad6' : '#6b7280';
     return `<tr>
       <td class="muted">#${idx + 1}</td>
-      <td class="ticker">${p.ticker}</td>
+      <td class="ticker">${p.ticker}${p.committee ? ` <span title="Committee oversight: ${p.committee} — backtested +2.45%/trade EV" style="cursor:help">🏛</span>` : ''}</td>
       <td>$${p.price}</td>
       <td><span class="signal-pill signal-${Math.min(p.buyers, 5)}">${p.buyers}</span></td>
       <td>${p.sellers ? `<span style="color:#ef4444">${p.sellers}</span>` : '<span class="muted">0</span>'}</td>

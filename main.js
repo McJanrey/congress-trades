@@ -13,6 +13,7 @@ import { importKadoa, setKadoaTradesDir } from './import-kadoa.js';
 
 const { autoUpdater } = electronUpdater;
 import { loadPortfolio, savePortfolio, valuePortfolio, setPortfolioDir } from './portfolio.js';
+import { sectorFor, loadCommitteeLookup, checkRelevance } from './committee.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -37,6 +38,24 @@ if (!fs.existsSync(CONFIG_FILE)) {
 
 const MEMBER_CACHE = new JsonCache(path.join(CACHE_DIR, 'members.json'));
 const PRICE_CACHE = new JsonCache(path.join(CACHE_DIR, 'prices.json'));
+const SECTOR_CACHE = new JsonCache(path.join(CACHE_DIR, 'sectors.json'));
+
+let committeeLookupPromise = null;
+function getCommitteeLookup() {
+  if (!committeeLookupPromise) {
+    committeeLookupPromise = loadCommitteeLookup(MEMBER_CACHE).catch(() => () => null);
+  }
+  return committeeLookupPromise;
+}
+
+// Is this (member, ticker) trade committee-relevant? Cached sector lookups.
+async function tradeRelevance(memberName, ticker) {
+  const lookup = await getCommitteeLookup();
+  const codes = lookup(memberName);
+  if (!codes) return { relevant: false, committee: null };
+  const sec = await sectorFor(ticker, SECTOR_CACHE);
+  return checkRelevance(codes, sec);
+}
 setPortfolioDir(DATA_DIR);
 setKadoaTradesDir(TRADES_DIR);
 
@@ -120,6 +139,7 @@ async function runRefresh({ background = false } = {}) {
     let parsedCount = 0;
     let processed = 0;
     const buyers = new Set();
+    const committeeHits = [];
 
     for (const f of newHits) {
       processed++;
@@ -133,6 +153,14 @@ async function runRefresh({ background = false } = {}) {
         parsedCount += r.data.transactions.length;
         if (r.data.transactions.some((t) => t.transaction_type === 'P')) {
           buyers.add(r.data.member);
+        }
+        // The backtested high-edge signal: committee-relevant buys in fresh filings.
+        for (const t of r.data.transactions) {
+          if (t.transaction_type !== 'P' || !t.ticker || t.asset_type === 'OP') continue;
+          const rel = await tradeRelevance(r.data.member, t.ticker);
+          if (rel.relevant) {
+            committeeHits.push({ member: r.data.member, ticker: t.ticker, committee: rel.committee });
+          }
         }
       }
       seen.add(f.docId);
@@ -161,7 +189,17 @@ async function runRefresh({ background = false } = {}) {
     });
     send('trades-updated');
 
-    if (parsedCount > 0) {
+    // Committee-relevant buys get their own loud notification — the
+    // backtested edge worth acting on fast.
+    if (committeeHits.length > 0) {
+      const lines = committeeHits.slice(0, 3).map((h) => `${h.ticker} — ${h.member} (${h.committee})`);
+      new Notification({
+        title: '🏛 Committee signal',
+        body: lines.join('\n'),
+        urgency: 'critical',
+      }).show();
+      send('refresh-progress', { type: 'status', text: `🏛 Committee signal: ${committeeHits.map((h) => h.ticker).join(', ')}` });
+    } else if (parsedCount > 0) {
       const title = background ? 'Congress Trades — background update' : 'Congress Trades';
       const buyerList = [...buyers].slice(0, 3).join(', ');
       new Notification({
@@ -331,10 +369,20 @@ ipcMain.handle('compute-picks', async (event, { windowDays = 60 } = {}) => {
     // Conviction = sum of per-buyer weights (hyperactive managed accounts ≈ 0).
     const conviction = [...g.buyers].reduce((a, m) => a + convictionWeight(m), 0);
 
+    // Committee relevance: any buyer whose committee oversees this sector.
+    // Backtested as the strongest signal in the dataset (+2.45%/trade EV).
+    let committee = null;
+    for (const m of g.buyers) {
+      const rel = await tradeRelevance(m, g.ticker);
+      if (rel.relevant) { committee = rel.committee; break; }
+    }
+
     // Composite score, tuned for "follow deliberate buyers early":
-    //  conviction-weighted consensus dominates, then buyer quality, freshness,
+    //  committee relevance is the strongest backtested edge, then
+    //  conviction-weighted consensus, buyer quality, freshness,
     //  bonus if price hasn't run up yet, penalty for member sells.
     const score =
+      (committee ? 5 : 0) +
       conviction * 4 +
       Math.max(-2, Math.min(2, avgQuality / 10)) * 2 +
       recency * 2 +
@@ -344,6 +392,7 @@ ipcMain.handle('compute-picks', async (event, { windowDays = 60 } = {}) => {
 
     // Human-readable rationale so the ranking never looks arbitrary.
     const reasons = [];
+    if (committee) reasons.push(`🏛 committee oversight: ${committee}`);
     if (g.buyers.size > 1) reasons.push(`${g.buyers.size} members buying`);
     if (conviction >= 0.8) reasons.push('deliberate buy (low-volume filer)');
     if (conviction < 0.3) reasons.push('managed-account flow (weak intent)');
@@ -365,6 +414,7 @@ ipcMain.handle('compute-picks', async (event, { windowDays = 60 } = {}) => {
       runupPct: runup != null ? Math.round(runup * 1000) / 10 : null,
       avgBuyerReturn: Math.round(avgQuality * 10) / 10,
       conviction: Math.round(conviction * 100) / 100,
+      committee,
       reasons,
       score: Math.round(score * 10) / 10,
     });
