@@ -48,7 +48,9 @@ export async function valuePortfolio(priceCache) {
   const enriched = [];
   for (const pos of p.positions) {
     const pr = prices[pos.ticker.toUpperCase()];
-    const entryUsd = pr ? closeOnOrAfter(pr.series, pos.date) : null;
+    // Same-day buys: no close exists yet for the buy date — fall back to the
+    // most recent close until the market prints one.
+    const entryUsd = pr ? (closeOnOrAfter(pr.series, pos.date) || pr.lastClose) : null;
     const fxAtBuy = closeOnOrAfter(fx.series, pos.date) || fxNow;
     if (!entryUsd || !pr.lastClose) {
       enriched.push({ ...pos, error: 'no price data' });
