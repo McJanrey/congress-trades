@@ -110,9 +110,11 @@ export async function fetchSpotAndHistory(ticker, fromUnix, cache) {
   const key = ticker.toUpperCase();
   const hour = 3600_000;
   const cached = cache.get(key);
-  if (cached && cached._ts && Date.now() - cached._ts < hour) return cached;
+  // Never serve a cached failure — a transient rate-limit must not poison
+  // an hour of lookups.
+  if (cached && !cached.error && cached._ts && Date.now() - cached._ts < hour) return cached;
 
-  try {
+  const attempt = async () => {
     // Yahoo expects period1/period2 in seconds.
     const period1 = Math.floor(fromUnix / 1000);
     const period2 = Math.floor(Date.now() / 1000);
@@ -124,7 +126,6 @@ export async function fetchSpotAndHistory(ticker, fromUnix, cache) {
     if (!result) throw new Error('no result');
     const ts = result.timestamp || [];
     const closes = result.indicators?.quote?.[0]?.close || [];
-    // Build a date-keyed map for fast lookup.
     const series = {};
     for (let i = 0; i < ts.length; i++) {
       if (closes[i] != null) {
@@ -133,15 +134,24 @@ export async function fetchSpotAndHistory(ticker, fromUnix, cache) {
       }
     }
     const last = closes.filter((c) => c != null).pop();
-    const info = { ticker: key, lastClose: last ?? null, series };
+    return { ticker: key, lastClose: last ?? null, series };
+  };
+
+  try {
+    let info;
+    try {
+      info = await attempt();
+    } catch (e) {
+      // One retry after a short backoff — covers 429 bursts.
+      await new Promise((r) => setTimeout(r, 1500));
+      info = await attempt();
+    }
     cache.set(key, info);
     cache.flush();
     return info;
   } catch (e) {
-    const info = { ticker: key, error: e.message, series: {} };
-    cache.set(key, info);
-    cache.flush();
-    return info;
+    // Do NOT cache failures.
+    return { ticker: key, error: e.message, series: {} };
   }
 }
 

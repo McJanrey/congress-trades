@@ -605,6 +605,7 @@ function renderPicks(picks) {
 
 // ---------- My TFSA tab ----------
 let pfChart = null;
+let pfRetryTimer = null;
 const fmtCad = (n) => new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD' }).format(n);
 
 $('#pf-date').value = new Date().toISOString().slice(0, 10);
@@ -840,7 +841,7 @@ function renderHoldings() {
   const fxNow = v.totals.fxNow || 1.37;
 
   // Apply live overrides on top of the last full valuation.
-  const rows = v.enriched.map((e) => {
+  const rows = (v.enriched || []).map((e) => {
     if (e.error) return e;
     const lastUsd = livePrices[e.ticker] ?? e.lastUsd;
     const valueCad = e.shares * lastUsd * fxNow;
@@ -864,9 +865,10 @@ function renderHoldings() {
 
   $('#pf-table tbody').innerHTML = rows.map((e) => {
     if (e.error) {
+      // Transient price failure: position is safe, just not priced yet.
       return `<tr><td class="ticker">${e.ticker}</td><td>${e.date}</td><td>${fmtCad(e.cad)}</td>
-        <td colspan="6" class="muted">${e.error}</td>
-        <td><button class="copy-btn" data-remove="${e.id}">✕</button></td></tr>`;
+        <td colspan="6" class="muted">⏳ prices loading — retrying automatically</td>
+        <td></td></tr>`;
     }
     const c = e.plCad >= 0 ? '#22c55e' : '#ef4444';
     const s = e.plCad >= 0 ? '+' : '';
@@ -929,6 +931,12 @@ async function refreshPortfolio() {
   renderHoldings();
   startLiveStream(v.enriched.filter((e) => !e.error).map((e) => e.ticker));
   renderAdvice(t.cashCad, new Set(v.enriched.map((e) => e.ticker)));
+
+  // Self-heal: any position that couldn't be priced retries shortly.
+  if (v.enriched.some((e) => e.error)) {
+    clearTimeout(pfRetryTimer);
+    pfRetryTimer = setTimeout(refreshPortfolio, 20_000);
+  }
 
   // Value-over-time line chart with a cost baseline. The timeline has one
   // point per market day — on day one, seed it with cost-at-buy → value-now
@@ -1018,10 +1026,10 @@ if (api.onUpdateAvailable) {
   $('#update-dismiss').addEventListener('click', () => updBanner.classList.add('hidden'));
 }
 
-// Boot: load data, then kick off background computations. Periodic re-check
-// keeps prices fresh while the app sits open (computes are disk-cached, so
-// repeats are cheap).
-reload().then(() => autoGains(true));
+// Boot: load data, then kick off background computations. Gains recompute
+// is delayed so the portfolio's handful of price lookups never compete with
+// the ~500-ticker burst (Yahoo rate-limits the stampede after updates).
+reload().then(() => setTimeout(() => autoGains(true), 20_000));
 setInterval(() => {
   autoGains();
   const active = document.querySelector('.tab.active')?.dataset.tab;
