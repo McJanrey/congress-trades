@@ -716,12 +716,18 @@ async function renderAdviceInner(el, cashCad, heldTickers) {
         const wholeShareCad = r.price ? r.price * effFx : null;
         const wholeShareAlt = units != null && units < 1 && wholeShareCad <= cashCad
           ? ` (or 1 whole share ≈ ${fmtCad(wholeShareCad)})` : '';
+        const tp = (r.price * 1.05).toFixed(2);
+        const sl = (r.price * 0.95).toFixed(2);
+        const holdNote = r.committee
+          ? `sell at <b style="color:#22c55e">$${tp}</b> (+5%) or <b style="color:#ef4444">$${sl}</b> (−5%) — backtested median ~7 days`
+          : `sell at <b style="color:#22c55e">$${tp}</b> (+5%) or <b style="color:#ef4444">$${sl}</b> (−5%) — typically 1–2 weeks, give up at 3 months`;
         return `
         <div class="advice-row">
           <span class="advice-amount" style="min-width:150px">BUY ${unitsStr} ×</span>
           <span class="advice-ticker ticker">${r.ticker}</span>
           <span class="advice-why">
             <b style="color:#c5cad6">= ${fmtCad(r.cad)}</b> (US$${usd.toFixed(2)} @ $${r.price}/share)${wholeShareAlt}<br/>
+            Exit plan: ${holdNote}<br/>
             ${(r.reasons || []).join(' • ') || `score ${r.score}`}
           </span>
           <button class="copy-btn" data-adv-copy="${r.ticker}">📋 Copy</button>
@@ -795,11 +801,19 @@ async function refreshPortfolio() {
   $('#pf-table tbody').innerHTML = v.enriched.map((e) => {
     if (e.error) {
       return `<tr><td class="ticker">${e.ticker}</td><td>${e.date}</td><td>${fmtCad(e.cad)}</td>
-        <td colspan="5" class="muted">${e.error}</td>
+        <td colspan="6" class="muted">${e.error}</td>
         <td><button class="copy-btn" data-remove="${e.id}">✕</button></td></tr>`;
     }
     const c = e.plCad >= 0 ? '#22c55e' : '#ef4444';
     const s = e.plCad >= 0 ? '+' : '';
+    // Exit-rule verdict from the backtested strategy: +5% TP / −5% SL / 3m max.
+    const usdRet = (e.lastUsd - e.entryUsd) / e.entryUsd;
+    const daysHeld = Math.floor((Date.now() - Date.parse(e.date)) / 86400_000);
+    let verdict, vColor;
+    if (usdRet >= 0.05) { verdict = '🎯 SELL — target hit'; vColor = '#22c55e'; }
+    else if (usdRet <= -0.05) { verdict = '🛑 SELL — stop hit'; vColor = '#ef4444'; }
+    else if (daysHeld > 90) { verdict = '⌛ SELL — time up'; vColor = '#f59e0b'; }
+    else { verdict = `HOLD (${daysHeld}d) → $${(e.entryUsd * 1.05).toFixed(2)}`; vColor = '#c5cad6'; }
     return `<tr>
       <td class="ticker">${e.ticker}</td>
       <td>${e.date}</td>
@@ -809,6 +823,7 @@ async function refreshPortfolio() {
       <td>${e.shares}</td>
       <td>${fmtCad(e.valueCad)}</td>
       <td style="color:${c};font-weight:600">${s}${fmtCad(e.plCad)} (${s}${e.plPct}%)</td>
+      <td style="color:${vColor};font-size:12px;font-weight:600" title="Strategy: sell at +5% or −5% on the USD price, or after ~3 months">${verdict}</td>
       <td><button class="copy-btn" data-remove="${e.id}" title="Remove position">✕</button></td>
     </tr>`;
   }).join('');
