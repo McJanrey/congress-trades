@@ -26,10 +26,21 @@ const COMMITTEE_SECTORS = {
 // generally NOT TFSA-qualified investments under CRA rules.
 const OTC_EXCHANGES = new Set(['PNK', 'OQB', 'OQX', 'OTC', 'OEM', 'OBB']);
 
+const EXCHANGE_NAMES = {
+  NYQ: 'NYSE', ASE: 'NYSE American', PCX: 'NYSE Arca',
+  NMS: 'Nasdaq', NGM: 'Nasdaq', NCM: 'Nasdaq',
+  TOR: 'TSX', VAN: 'TSX-V', CNQ: 'CSE', NEO: 'NEO (Canada)',
+  PNK: 'OTC Pink', OQX: 'OTCQX', OQB: 'OTCQB',
+  LSE: 'London', GER: 'XETRA', PAR: 'Paris', TYO: 'Tokyo',
+};
+function friendlyExchange(code, disp) {
+  return EXCHANGE_NAMES[code] || disp || code || null;
+}
+
 export async function sectorFor(ticker, sectorCache) {
   const cached = sectorCache.get(ticker);
-  // 'exchange' missing = entry from an older app version — refetch.
-  if (cached && 'exchange' in cached && !sectorCache.isStale(ticker, 30 * 86400_000)) return cached;
+  // 'name' missing = entry from an older app version — refetch.
+  if (cached && 'name' in cached && !sectorCache.isStale(ticker, 30 * 86400_000)) return cached;
   try {
     const res = await fetch(
       `https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(ticker)}&quotesCount=1&newsCount=0`,
@@ -41,6 +52,8 @@ export async function sectorFor(ticker, sectorCache) {
       sector: q?.sector || q?.sectorDisp || null,
       industry: q?.industry || q?.industryDisp || null,
       exchange: q?.exchange || null,
+      exchangeName: friendlyExchange(q?.exchange, q?.exchDisp),
+      name: q?.longname || q?.shortname || null,
       otc: OTC_EXCHANGES.has(q?.exchange),
     };
     sectorCache.set(ticker, info);

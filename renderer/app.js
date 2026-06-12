@@ -581,7 +581,7 @@ function renderPicks(picks) {
     const scoreColor = idx < 5 ? '#22c55e' : idx < 15 ? '#c5cad6' : '#6b7280';
     return `<tr>
       <td class="muted">#${idx + 1}</td>
-      <td class="ticker">${p.ticker}${p.committee ? ` <span title="Committee oversight: ${p.committee} — backtested +2.45%/trade EV" style="cursor:help">🏛</span>` : ''}${p.otc ? ` <span title="OTC market — not TFSA-eligible" style="cursor:help;color:#f59e0b;font-size:10px">OTC</span>` : ''}</td>
+      <td><span class="ticker" title="${(p.companyName || p.asset || '').replace(/"/g, '&quot;')}">${p.ticker}</span>${p.committee ? ` <span title="Committee oversight: ${p.committee} — backtested +2.45%/trade EV" style="cursor:help">🏛</span>` : ''}${p.otc ? ` <span title="OTC market — not TFSA-eligible" style="cursor:help;color:#f59e0b;font-size:10px">OTC</span>` : ''}<br/><span class="muted" style="font-size:10px">${(p.companyName || '').slice(0, 28)}${p.exchangeName ? ` · ${p.exchangeName}` : ''}</span></td>
       <td>$${p.price}</td>
       <td><span class="signal-pill signal-${Math.min(p.buyers, 5)}">${p.buyers}</span></td>
       <td>${p.sellers ? `<span style="color:#ef4444">${p.sellers}</span>` : '<span class="muted">0</span>'}</td>
@@ -727,6 +727,7 @@ async function renderAdviceInner(el, cashCad, heldTickers) {
           <span class="advice-amount" style="min-width:150px">BUY ${unitsStr} ×</span>
           <span class="advice-ticker ticker">${r.ticker}</span>
           <span class="advice-why">
+            <b style="color:#e6e8ee">${r.companyName || r.asset || r.ticker}</b>${r.exchangeName ? ` <span style="color:#3a82f7">· ${r.exchangeName}</span>` : ''}<br/>
             <b style="color:#c5cad6">= ${fmtCad(r.cad)}</b> (US$${usd.toFixed(2)} @ $${r.price}/share)${wholeShareAlt}<br/>
             Exit plan: ${holdNote}<br/>
             ${(r.reasons || []).join(' • ') || `score ${r.score}`}

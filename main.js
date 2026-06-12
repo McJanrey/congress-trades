@@ -421,6 +421,8 @@ ipcMain.handle('compute-picks', async (event, { windowDays = 60 } = {}) => {
       conviction: Math.round(conviction * 100) / 100,
       committee,
       otc,
+      companyName: secInfo.name || g.asset || null,
+      exchangeName: secInfo.exchangeName || null,
       reasons,
       score: Math.round(score * 10) / 10,
     });
