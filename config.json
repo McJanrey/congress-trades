@@ -1,6 +1,7 @@
 {
   "watchlist": [],
   "year": 2026,
+  "backfillYears": [2025, 2026],
   "minTransactionUsd": 15000,
   "lookbackDays": 180,
   "autoRefreshMinutes": 60,

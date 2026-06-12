@@ -40,6 +40,27 @@ const PRICE_CACHE = new JsonCache(path.join(CACHE_DIR, 'prices.json'));
 setPortfolioDir(DATA_DIR);
 setKadoaTradesDir(TRADES_DIR);
 
+// Disk-persisted computed results (gains, picks) so a fresh launch shows
+// data instantly instead of refetching hundreds of Yahoo tickers.
+const COMPUTED_TTL = 3600_000; // 1h
+function computedFile(name) { return path.join(CACHE_DIR, `computed-${name}.json`); }
+function readComputed(name) {
+  try {
+    const j = JSON.parse(fs.readFileSync(computedFile(name), 'utf8'));
+    if (Date.now() - j.ts < COMPUTED_TTL) return j.data;
+  } catch {}
+  return null;
+}
+function writeComputed(name, data) {
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
+  fs.writeFileSync(computedFile(name), JSON.stringify({ ts: Date.now(), data }));
+}
+function invalidateComputed() {
+  for (const f of ['gains', 'picks-30', 'picks-60', 'picks-90']) {
+    try { fs.unlinkSync(computedFile(f)); } catch {}
+  }
+}
+
 let mainWindow = null;
 let refreshTimer = null;
 let refreshInFlight = false;
@@ -73,11 +94,21 @@ async function runRefresh({ background = false } = {}) {
     const state = loadState(STATE_FILE);
     const seen = new Set(state.seenDocIds);
 
-    send('refresh-progress', { type: 'status', text: `Fetching ${config.year} filings index...` });
-    const xml = await downloadIndex(config.year);
-    const all = parseFilings(xml);
-    const hits = filterFilings(all, config);
-    const newHits = hits.filter((f) => !seen.has(f.docId));
+    // Multi-year backfill: when backfillYears is set, pull every year's index
+    // and ignore the lookback window (we want full history).
+    const years = config.backfillYears?.length ? config.backfillYears : [config.year];
+    let all = [];
+    for (const y of years) {
+      send('refresh-progress', { type: 'status', text: `Fetching ${y} filings index...` });
+      const xml = await downloadIndex(y);
+      all = all.concat(parseFilings(xml).map((f) => ({ ...f, indexYear: y })));
+    }
+    const filterCfg = years.length > 1 ? { ...config, lookbackDays: 0 } : config;
+    const hits = filterFilings(all, filterCfg);
+    // Bound each cycle so a deep backfill can't pin the app for an hour —
+    // the rest streams in on subsequent hourly refreshes.
+    const MAX_PARSE_PER_CYCLE = 300;
+    const newHits = hits.filter((f) => !seen.has(f.docId)).slice(0, MAX_PARSE_PER_CYCLE);
 
     send('refresh-progress', {
       type: 'status',
@@ -96,7 +127,7 @@ async function runRefresh({ background = false } = {}) {
         type: 'status',
         text: `[${processed}/${newHits.length}] Parsing ${f.first} ${f.last}...`,
       });
-      const r = parsePtr(config.year, f.docId, { scriptDir: SCRIPT_DIR });
+      const r = parsePtr(f.indexYear || config.year, f.docId, { scriptDir: SCRIPT_DIR });
       if (r.ok) {
         fs.writeFileSync(path.join(TRADES_DIR, `${f.docId}.json`), JSON.stringify(r.data, null, 2));
         parsedCount += r.data.transactions.length;
@@ -111,8 +142,10 @@ async function runRefresh({ background = false } = {}) {
         send('trades-updated');
       }
     }
-    for (const f of hits) seen.add(f.docId);
+    // Only parsed filings are marked seen (inside the loop above) so an
+    // interrupted backfill resumes where it left off next cycle.
     saveState(STATE_FILE, { seenDocIds: [...seen], lastRun: new Date().toISOString() });
+    if (newHits.length > 0) invalidateComputed();
 
     send('refresh-progress', { type: 'status', text: 'Importing Senate + supplemental data...' });
     try {
@@ -161,8 +194,15 @@ app.whenReady().then(() => {
   createWindow();
   const config = loadConfig(CONFIG_FILE);
   if (config.refreshOnLaunch) {
-    // Wait for renderer to be ready so progress messages reach it.
-    setTimeout(() => runRefresh({ background: true }), 3000);
+    // Skip the launch refresh entirely if the last one was recent — the app
+    // opens instantly on existing data and the hourly cycle takes over.
+    const st = loadState(STATE_FILE);
+    const freshMs = 30 * 60_000;
+    const isFresh = st.lastRun && Date.now() - Date.parse(st.lastRun) < freshMs;
+    if (!isFresh) {
+      // Wait for renderer to be ready so progress messages reach it.
+      setTimeout(() => runRefresh({ background: true }), 3000);
+    }
   }
   scheduleAutoRefresh();
 
@@ -214,6 +254,8 @@ ipcMain.handle('reset-state', () => {
 
 // Ranked buy candidates: everything Congress bought recently, scored.
 ipcMain.handle('compute-picks', async (event, { windowDays = 60 } = {}) => {
+  const cachedPicks = readComputed(`picks-${windowDays}`);
+  if (cachedPicks) return cachedPicks;
   const send = (text) => event.sender.send('refresh-progress', { type: 'status', text });
   const all = collectAllTrades();
   const cutoff = Date.now() - windowDays * 86400_000;
@@ -325,6 +367,7 @@ ipcMain.handle('compute-picks', async (event, { windowDays = 60 } = {}) => {
 
   picks.sort((a, b) => b.score - a.score);
   send(`Done — ${picks.length} candidates scored.`);
+  writeComputed(`picks-${windowDays}`, picks);
   return picks;
 });
 
@@ -411,6 +454,8 @@ ipcMain.handle('get-member-dossier', async (_e, name) => {
 
 // Per-trade gains for the Trades tab. Returns { "docId|ticker|txdate": { entry, last, ret } }.
 ipcMain.handle('compute-gains', async (event) => {
+  const cached = readComputed('gains');
+  if (cached) return cached;
   const send = (text) => event.sender.send('refresh-progress', { type: 'status', text });
   const all = collectAllTrades().filter((t) => t.ticker && t.asset_type !== 'OP');
   const tickers = [...new Set(all.map((t) => t.ticker))];
@@ -447,6 +492,7 @@ ipcMain.handle('compute-gains', async (event) => {
     };
   }
   send(`Done — gains computed for ${Object.keys(gains).length} trades.`);
+  writeComputed('gains', gains);
   return gains;
 });
 
@@ -526,6 +572,8 @@ function collectAllTrades() {
           state_district: data.state_district,
           chamber: data.chamber || 'house',
           party: data.party || null,
+          // Exact PDF URL (carries the right year for backfilled filings).
+          doc_url: t.doc_url || (typeof data.source === 'string' && data.source.startsWith('http') ? data.source : null),
         });
       }
     } catch {}
