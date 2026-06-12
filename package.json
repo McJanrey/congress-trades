@@ -27,7 +27,8 @@
     "publish": {
       "provider": "github",
       "owner": "McJanrey",
-      "repo": "congress-trades"
+      "repo": "congress-trades",
+      "releaseType": "release"
     },
     "files": [
       "*.js",
