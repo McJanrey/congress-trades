@@ -1,0 +1,10 @@
+node_modules/
+state.json
+trades/
+samples/
+.cache/
+dist/
+portfolio.json
+*.zip
+*.log
+__pycache__/

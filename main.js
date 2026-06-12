@@ -1,0 +1,524 @@
+import { app, BrowserWindow, ipcMain, shell, Notification } from 'electron';
+import path from 'node:path';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import {
+  loadConfig, saveConfig, loadState, saveState,
+  downloadIndex, parseFilings, filterFilings,
+  parsePtr,
+} from './lib.js';
+import { JsonCache, lookupMember, fetchSpotAndHistory, closeOnOrAfter, parseFilingDate } from './enrich.js';
+import electronUpdater from 'electron-updater';
+import { importKadoa, setKadoaTradesDir } from './import-kadoa.js';
+
+const { autoUpdater } = electronUpdater;
+import { loadPortfolio, savePortfolio, valuePortfolio, setPortfolioDir } from './portfolio.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Packaged builds live inside read-only app.asar — all mutable data goes to
+// %APPDATA%/congress-trades instead. Dev runs keep using the project folder.
+const DATA_DIR = app.isPackaged ? app.getPath('userData') : __dirname;
+// parse_ptr.py is asar-unpacked so Python can actually read it when packaged.
+const SCRIPT_DIR = __dirname.includes('app.asar')
+  ? __dirname.replace('app.asar', 'app.asar.unpacked')
+  : __dirname;
+
+const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+const STATE_FILE = path.join(DATA_DIR, 'state.json');
+const TRADES_DIR = path.join(DATA_DIR, 'trades');
+const CACHE_DIR = path.join(DATA_DIR, '.cache');
+
+// First run of a packaged build: seed config from the bundled default.
+if (!fs.existsSync(CONFIG_FILE)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.copyFileSync(path.join(__dirname, 'config.json'), CONFIG_FILE);
+}
+
+const MEMBER_CACHE = new JsonCache(path.join(CACHE_DIR, 'members.json'));
+const PRICE_CACHE = new JsonCache(path.join(CACHE_DIR, 'prices.json'));
+setPortfolioDir(DATA_DIR);
+setKadoaTradesDir(TRADES_DIR);
+
+let mainWindow = null;
+let refreshTimer = null;
+let refreshInFlight = false;
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1280,
+    height: 820,
+    backgroundColor: '#0e0f13',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+}
+
+function send(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload);
+  }
+}
+
+async function runRefresh({ background = false } = {}) {
+  if (refreshInFlight) return { ok: false, error: 'refresh already running' };
+  refreshInFlight = true;
+  try {
+    const config = loadConfig(CONFIG_FILE);
+    const state = loadState(STATE_FILE);
+    const seen = new Set(state.seenDocIds);
+
+    send('refresh-progress', { type: 'status', text: `Fetching ${config.year} filings index...` });
+    const xml = await downloadIndex(config.year);
+    const all = parseFilings(xml);
+    const hits = filterFilings(all, config);
+    const newHits = hits.filter((f) => !seen.has(f.docId));
+
+    send('refresh-progress', {
+      type: 'status',
+      text: `${all.length} filings • ${hits.length} on watchlist • ${newHits.length} new`,
+    });
+
+    fs.mkdirSync(TRADES_DIR, { recursive: true });
+
+    let parsedCount = 0;
+    let processed = 0;
+    const buyers = new Set();
+
+    for (const f of newHits) {
+      processed++;
+      send('refresh-progress', {
+        type: 'status',
+        text: `[${processed}/${newHits.length}] Parsing ${f.first} ${f.last}...`,
+      });
+      const r = parsePtr(config.year, f.docId, { scriptDir: SCRIPT_DIR });
+      if (r.ok) {
+        fs.writeFileSync(path.join(TRADES_DIR, `${f.docId}.json`), JSON.stringify(r.data, null, 2));
+        parsedCount += r.data.transactions.length;
+        if (r.data.transactions.some((t) => t.transaction_type === 'P')) {
+          buyers.add(r.data.member);
+        }
+      }
+      seen.add(f.docId);
+
+      // Re-emit trades list periodically so the UI grows during long refreshes.
+      if (processed % 5 === 0 || processed === newHits.length) {
+        send('trades-updated');
+      }
+    }
+    for (const f of hits) seen.add(f.docId);
+    saveState(STATE_FILE, { seenDocIds: [...seen], lastRun: new Date().toISOString() });
+
+    send('refresh-progress', { type: 'status', text: 'Importing Senate + supplemental data...' });
+    try {
+      const k = await importKadoa();
+      send('refresh-progress', { type: 'status', text: `Supplemental: ${k.transactions} trades from ${k.filers} filers.` });
+    } catch (e) {
+      send('refresh-progress', { type: 'status', text: `Supplemental import failed: ${e.message}` });
+    }
+
+    send('refresh-progress', {
+      type: 'status',
+      text: `Done. ${newHits.length} new filing(s), ${parsedCount} trade(s).`,
+    });
+    send('trades-updated');
+
+    if (parsedCount > 0) {
+      const title = background ? 'Congress Trades — background update' : 'Congress Trades';
+      const buyerList = [...buyers].slice(0, 3).join(', ');
+      new Notification({
+        title,
+        body: `${newHits.length} new filing(s), ${parsedCount} trade(s)${buyerList ? `. Buyers: ${buyerList}` : ''}`,
+      }).show();
+    }
+
+    return { ok: true, totalFilings: all.length, watchlistHits: hits.length, newFilings: newHits.length, newTransactions: parsedCount };
+  } catch (e) {
+    send('refresh-progress', { type: 'status', text: `Error: ${e.message}` });
+    return { ok: false, error: e.message };
+  } finally {
+    refreshInFlight = false;
+  }
+}
+
+function scheduleAutoRefresh() {
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  const config = loadConfig(CONFIG_FILE);
+  const minutes = Number(config.autoRefreshMinutes) || 0;
+  if (minutes <= 0) return;
+  refreshTimer = setInterval(() => {
+    runRefresh({ background: true }).catch((e) => console.error('auto-refresh failed', e));
+  }, minutes * 60_000);
+  console.log(`Auto-refresh scheduled every ${minutes} min.`);
+}
+
+app.whenReady().then(() => {
+  createWindow();
+  const config = loadConfig(CONFIG_FILE);
+  if (config.refreshOnLaunch) {
+    // Wait for renderer to be ready so progress messages reach it.
+    setTimeout(() => runRefresh({ background: true }), 3000);
+  }
+  scheduleAutoRefresh();
+
+  // Self-update from GitHub releases: check on launch, then every 4 hours.
+  // Downloads in the background, notifies, installs on app quit.
+  if (app.isPackaged) {
+    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    setInterval(() => autoUpdater.checkForUpdatesAndNotify().catch(() => {}), 4 * 3600_000);
+    autoUpdater.on('update-downloaded', (info) => {
+      send('refresh-progress', { type: 'status', text: `Update v${info.version} downloaded — restarts on next quit.` });
+    });
+  }
+});
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+
+// ---------- IPC ----------
+
+ipcMain.handle('get-config', () => loadConfig(CONFIG_FILE));
+
+ipcMain.handle('save-config', (_e, config) => {
+  saveConfig(CONFIG_FILE, config);
+  scheduleAutoRefresh(); // pick up new interval
+  return loadConfig(CONFIG_FILE);
+});
+
+ipcMain.handle('open-pdf', (_e, url) => shell.openExternal(url));
+
+ipcMain.handle('list-trades', () =>
+  collectAllTrades().sort((a, b) => new Date(b.transaction_date) - new Date(a.transaction_date)),
+);
+
+ipcMain.handle('refresh', () => runRefresh());
+
+ipcMain.handle('reset-state', () => {
+  if (fs.existsSync(STATE_FILE)) fs.unlinkSync(STATE_FILE);
+  return true;
+});
+
+// Ranked buy candidates: everything Congress bought recently, scored.
+ipcMain.handle('compute-picks', async (event, { windowDays = 60 } = {}) => {
+  const send = (text) => event.sender.send('refresh-progress', { type: 'status', text });
+  const all = collectAllTrades();
+  const cutoff = Date.now() - windowDays * 86400_000;
+
+  const parseUs = (s) => {
+    const m = /(\d{2})\/(\d{2})\/(\d{4})/.exec(s || '');
+    return m ? Date.parse(`${m[3]}-${m[1]}-${m[2]}`) : null;
+  };
+
+  // Per-member historical quality: average kadoa ret_since across their past buys.
+  const memberRets = new Map();
+  const memberTradeCounts = new Map();
+  for (const t of all) {
+    memberTradeCounts.set(t.member, (memberTradeCounts.get(t.member) || 0) + 1);
+    if (t.transaction_type === 'P' && typeof t.ret_since === 'number') {
+      if (!memberRets.has(t.member)) memberRets.set(t.member, []);
+      memberRets.get(t.member).push(t.ret_since);
+    }
+  }
+  const memberQuality = new Map(
+    [...memberRets].map(([m, rets]) => [m, rets.reduce((a, b) => a + b, 0) / rets.length]),
+  );
+  // Conviction weight: a member with hundreds of trades is almost certainly a
+  // professionally managed account robo-rebalancing (e.g. Cisneros's Morgan
+  // Stanley UMA) — each individual buy carries little intent. A member with a
+  // handful of deliberate trades carries full weight.
+  const convictionWeight = (m) => Math.min(1, 50 / (memberTradeCounts.get(m) || 1));
+
+  // Group recent buys by ticker.
+  const groups = new Map();
+  for (const t of all) {
+    if (!t.ticker || t.asset_type === 'OP') continue;
+    const ts = parseUs(t.transaction_date);
+    if (!ts || ts < cutoff || ts > Date.now()) continue;
+    if (!groups.has(t.ticker)) {
+      groups.set(t.ticker, { ticker: t.ticker, asset: t.asset, buyers: new Set(), sellers: new Set(), firstBuyTs: Infinity, lastBuyTs: 0 });
+    }
+    const g = groups.get(t.ticker);
+    if (t.transaction_type === 'P') {
+      g.buyers.add(t.member);
+      g.firstBuyTs = Math.min(g.firstBuyTs, ts);
+      g.lastBuyTs = Math.max(g.lastBuyTs, ts);
+    } else if (t.transaction_type.startsWith('S')) {
+      g.sellers.add(t.member);
+    }
+  }
+
+  const candidates = [...groups.values()].filter((g) => g.buyers.size > 0);
+  send(`Pricing ${candidates.length} congressional buy candidates...`);
+
+  let i = 0;
+  const picks = [];
+  for (const g of candidates) {
+    i++;
+    if (i % 15 === 0) send(`Pricing ${i}/${candidates.length}...`);
+    const p = await fetchSpotAndHistory(g.ticker, g.firstBuyTs - 7 * 86400_000, PRICE_CACHE);
+    if (!p.lastClose) continue;
+    const entryDate = new Date(g.firstBuyTs).toISOString().slice(0, 10);
+    const entry = closeOnOrAfter(p.series, entryDate);
+    const runup = entry ? (p.lastClose - entry) / entry : null;
+
+    const buyerQ = [...g.buyers].map((m) => memberQuality.get(m)).filter((q) => q != null);
+    const avgQuality = buyerQ.length ? buyerQ.reduce((a, b) => a + b, 0) / buyerQ.length : 0;
+
+    const daysSince = (Date.now() - g.lastBuyTs) / 86400_000;
+    const recency = Math.max(0, 1 - daysSince / windowDays); // 1 fresh → 0 stale
+
+    // Conviction = sum of per-buyer weights (hyperactive managed accounts ≈ 0).
+    const conviction = [...g.buyers].reduce((a, m) => a + convictionWeight(m), 0);
+
+    // Composite score, tuned for "follow deliberate buyers early":
+    //  conviction-weighted consensus dominates, then buyer quality, freshness,
+    //  bonus if price hasn't run up yet, penalty for member sells.
+    const score =
+      conviction * 4 +
+      Math.max(-2, Math.min(2, avgQuality / 10)) * 2 +
+      recency * 2 +
+      (runup != null && runup < 0.05 ? 2 : 0) +
+      (runup != null && runup < 0 ? 1 : 0) -
+      g.sellers.size * 2;
+
+    // Human-readable rationale so the ranking never looks arbitrary.
+    const reasons = [];
+    if (g.buyers.size > 1) reasons.push(`${g.buyers.size} members buying`);
+    if (conviction >= 0.8) reasons.push('deliberate buy (low-volume filer)');
+    if (conviction < 0.3) reasons.push('managed-account flow (weak intent)');
+    if (avgQuality > 5) reasons.push(`buyers avg +${Math.round(avgQuality)}% historically`);
+    if (daysSince <= 10) reasons.push('fresh filing');
+    if (runup != null && runup < 0) reasons.push('cheaper than their entry');
+    else if (runup != null && runup < 0.05) reasons.push('hasn’t run up yet');
+    else if (runup != null) reasons.push(`already +${Math.round(runup * 100)}% since entry`);
+    if (g.sellers.size > 0) reasons.push(`${g.sellers.size} member(s) selling`);
+
+    picks.push({
+      ticker: g.ticker,
+      asset: g.asset,
+      price: Math.round(p.lastClose * 100) / 100,
+      buyers: g.buyers.size,
+      buyerNames: [...g.buyers].slice(0, 4),
+      sellers: g.sellers.size,
+      lastBuy: new Date(g.lastBuyTs).toISOString().slice(0, 10),
+      runupPct: runup != null ? Math.round(runup * 1000) / 10 : null,
+      avgBuyerReturn: Math.round(avgQuality * 10) / 10,
+      conviction: Math.round(conviction * 100) / 100,
+      reasons,
+      score: Math.round(score * 10) / 10,
+    });
+  }
+
+  picks.sort((a, b) => b.score - a.score);
+  send(`Done — ${picks.length} candidates scored.`);
+  return picks;
+});
+
+ipcMain.handle('fx-rate', async () => {
+  const fx = await fetchSpotAndHistory('USDCAD=X', Date.now() - 7 * 86400_000, PRICE_CACHE);
+  return fx.lastClose || 1.37;
+});
+
+// ---------- Personal portfolio ----------
+ipcMain.handle('portfolio-get', () => loadPortfolio());
+ipcMain.handle('portfolio-save', (_e, p) => savePortfolio(p));
+ipcMain.handle('portfolio-add', (_e, pos) => {
+  const p = loadPortfolio();
+  p.positions.push({ ...pos, id: `pos_${Date.now()}` });
+  return savePortfolio(p);
+});
+ipcMain.handle('portfolio-remove', (_e, id) => {
+  const p = loadPortfolio();
+  p.positions = p.positions.filter((x) => x.id !== id);
+  return savePortfolio(p);
+});
+ipcMain.handle('portfolio-value', () => valuePortfolio(PRICE_CACHE));
+
+// All trades grouped + summarized per member, for the Members tab.
+ipcMain.handle('list-members', () => {
+  const trades = collectAllTrades();
+  const map = new Map();
+  for (const t of trades) {
+    if (!t.member) continue;
+    if (!map.has(t.member)) {
+      map.set(t.member, { name: t.member, state_district: t.state_district, trades: [], tickers: new Set() });
+    }
+    const m = map.get(t.member);
+    m.trades.push(t);
+    if (t.ticker) m.tickers.add(t.ticker);
+  }
+  return [...map.values()]
+    .map((m) => ({
+      name: m.name,
+      state_district: m.state_district,
+      tradeCount: m.trades.length,
+      tickerCount: m.tickers.size,
+      lastTradeDate: m.trades.map((t) => t.transaction_date).sort().pop(),
+    }))
+    .sort((a, b) => b.tradeCount - a.tradeCount);
+});
+
+ipcMain.handle('get-member-dossier', async (_e, name) => {
+  const trades = collectAllTrades().filter((t) => t.member === name);
+  if (trades.length === 0) return null;
+
+  // Try to split "First Last" or "Hon. First Middle Last" into (first, last) for bioguide lookup.
+  const parts = name.replace(/^Hon\.?\s+/i, '').split(/\s+/);
+  const first = parts[0];
+  const last = parts[parts.length - 1];
+  const info = await lookupMember({ first, last }, MEMBER_CACHE);
+
+  // Aggregate holdings by ticker.
+  const byTicker = new Map();
+  for (const t of trades) {
+    if (!t.ticker) continue;
+    if (!byTicker.has(t.ticker)) byTicker.set(t.ticker, { ticker: t.ticker, buys: 0, sells: 0, asset: t.asset, last: t.transaction_date });
+    const h = byTicker.get(t.ticker);
+    if (t.transaction_type === 'P') h.buys++;
+    else if (t.transaction_type.startsWith('S')) h.sells++;
+    if (t.transaction_date > h.last) h.last = t.transaction_date;
+  }
+  const holdings = [...byTicker.values()].sort((a, b) => (b.buys + b.sells) - (a.buys + a.sells));
+
+  const buys = trades.filter((t) => t.transaction_type === 'P').length;
+  const sells = trades.filter((t) => t.transaction_type.startsWith('S')).length;
+
+  return {
+    name,
+    info,
+    tradeCount: trades.length,
+    buys,
+    sells,
+    uniqueTickers: byTicker.size,
+    holdings,
+    trades: trades.slice(0, 50),
+  };
+});
+
+// Per-trade gains for the Trades tab. Returns { "docId|ticker|txdate": { entry, last, ret } }.
+ipcMain.handle('compute-gains', async (event) => {
+  const send = (text) => event.sender.send('refresh-progress', { type: 'status', text });
+  const all = collectAllTrades().filter((t) => t.ticker && t.asset_type !== 'OP');
+  const tickers = [...new Set(all.map((t) => t.ticker))];
+  send(`Fetching prices for ${tickers.length} tickers...`);
+
+  const earliestTs = Math.min(
+    ...all.map((t) => {
+      const iso = parseFilingDate(correctedTxDate(t));
+      return iso ? Date.parse(iso) : Date.now();
+    }),
+  );
+
+  const priceMap = {};
+  let i = 0;
+  for (const tk of tickers) {
+    i++;
+    if (i % 20 === 0) send(`Fetching prices ${i}/${tickers.length}...`);
+    priceMap[tk] = await fetchSpotAndHistory(tk, earliestTs, PRICE_CACHE);
+  }
+
+  const gains = {};
+  for (const t of all) {
+    const p = priceMap[t.ticker];
+    const iso = parseFilingDate(correctedTxDate(t));
+    if (!p || !iso || !p.lastClose) continue;
+    const entry = closeOnOrAfter(p.series, iso);
+    if (!entry) continue;
+    const ret = (p.lastClose - entry) / entry;
+    if (!isFinite(ret)) continue;
+    gains[`${t.doc_id}|${t.ticker}|${t.transaction_date}`] = {
+      entry: Math.round(entry * 100) / 100,
+      last: Math.round(p.lastClose * 100) / 100,
+      ret,
+    };
+  }
+  send(`Done — gains computed for ${Object.keys(gains).length} trades.`);
+  return gains;
+});
+
+// Mirror of the renderer's off-by-one-year typo correction (tx date after notification date).
+function correctedTxDate(t) {
+  const m = /(\d{2})\/(\d{2})\/(\d{4})/.exec(t.transaction_date || '');
+  const n = /(\d{2})\/(\d{2})\/(\d{4})/.exec(t.notification_date || '');
+  if (m && n) {
+    const tx = Date.parse(`${m[3]}-${m[1]}-${m[2]}`);
+    const nf = Date.parse(`${n[3]}-${n[1]}-${n[2]}`);
+    if (tx > nf + 86400_000) return `${m[1]}/${m[2]}/${Number(m[3]) - 1}`;
+  }
+  return t.transaction_date;
+}
+
+ipcMain.handle('compute-performance', async (event, { metric = 'avg', minTrades = 3 } = {}) => {
+  const send = (text) => event.sender.send('perf-progress', text);
+  const trades = collectAllTrades().filter((t) => t.transaction_type === 'P' && t.ticker && t.asset_type !== 'OP');
+  const tickers = [...new Set(trades.map((t) => t.ticker))];
+  send(`Fetching prices for ${tickers.length} tickers from Yahoo...`);
+
+  // Earliest tx date across all trades — used as period1 for Yahoo.
+  const earliestTs = Math.min(
+    ...trades.map((t) => {
+      const iso = parseFilingDate(t.transaction_date);
+      return iso ? Date.parse(iso) : Date.now();
+    }),
+  );
+
+  let i = 0;
+  const priceMap = {};
+  for (const tk of tickers) {
+    i++;
+    if (i % 10 === 0) send(`Fetching prices ${i}/${tickers.length}...`);
+    priceMap[tk] = await fetchSpotAndHistory(tk, earliestTs, PRICE_CACHE);
+  }
+
+  send('Computing per-member returns...');
+  const byMember = new Map();
+  for (const t of trades) {
+    const dt = parseFilingDate(t.transaction_date);
+    const p = priceMap[t.ticker];
+    if (!p || !dt || !p.lastClose) continue;
+    const entry = closeOnOrAfter(p.series, dt);
+    if (!entry || !p.lastClose) continue;
+    const ret = (p.lastClose - entry) / entry;
+    if (!isFinite(ret)) continue;
+    if (!byMember.has(t.member)) byMember.set(t.member, { member: t.member, rets: [] });
+    byMember.get(t.member).rets.push(ret);
+  }
+
+  const rows = [...byMember.values()]
+    .filter((m) => m.rets.length >= minTrades)
+    .map((m) => {
+      const avg = m.rets.reduce((a, b) => a + b, 0) / m.rets.length;
+      const winRate = m.rets.filter((r) => r > 0).length / m.rets.length;
+      return { member: m.member, n: m.rets.length, avg, winRate };
+    });
+
+  rows.sort((a, b) => (metric === 'winrate' ? b.winRate - a.winRate : b.avg - a.avg));
+  send(`Done — ${rows.length} members with ≥${minTrades} valid buys.`);
+  return rows;
+});
+
+function collectAllTrades() {
+  if (!fs.existsSync(TRADES_DIR)) return [];
+  const files = fs.readdirSync(TRADES_DIR).filter((f) => f.endsWith('.json'));
+  const out = [];
+  for (const f of files) {
+    try {
+      const data = JSON.parse(fs.readFileSync(path.join(TRADES_DIR, f), 'utf8'));
+      for (const t of data.transactions || []) {
+        out.push({
+          ...t,
+          member: data.member,
+          doc_id: data.doc_id,
+          state_district: data.state_district,
+          chamber: data.chamber || 'house',
+          party: data.party || null,
+        });
+      }
+    } catch {}
+  }
+  return out;
+}

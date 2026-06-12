@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Congress Trades</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">Congress Trades <span class="muted">House PTRs</span></div>
+    <nav class="tabs">
+      <button class="tab active" data-tab="trades">Trades</button>
+      <button class="tab" data-tab="consensus">Consensus</button>
+      <button class="tab" data-tab="members">Members</button>
+      <button class="tab" data-tab="performance">Performance</button>
+      <button class="tab" data-tab="picks">Picks</button>
+      <button class="tab" data-tab="portfolio">My TFSA</button>
+    </nav>
+    <div class="controls">
+      <span id="status" class="muted">Ready.</span>
+      <button id="open-ws" class="ghost">💚 Wealthsimple</button>
+      <button id="settings-btn" class="ghost">⚙</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- TRADES TAB -->
+    <div class="tab-pane" data-pane="trades">
+      <aside>
+        <div class="filter-group">
+          <label class="muted">Filter by member</label>
+          <select id="member-filter"><option value="">All members</option></select>
+        </div>
+        <div class="filter-group">
+          <label class="muted">Filter by type</label>
+          <select id="type-filter">
+            <option value="">All types</option>
+            <option value="P">Buys only</option>
+            <option value="S">Sells (full)</option>
+            <option value="S (partial)">Sells (partial)</option>
+            <option value="E">Exchanges</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label class="muted">Search ticker/asset</label>
+          <input id="search" type="text" placeholder="NVDA, Tesla..." />
+        </div>
+        <div class="filter-group">
+          <label class="muted">Stats</label>
+          <div id="stats" class="stats"></div>
+        </div>
+      </aside>
+      <section>
+        <table id="trades-table">
+          <thead>
+            <tr>
+              <th class="sortable" data-sort="signal" title="How many distinct members bought this ticker in the last 30 days">Signal ▾</th>
+              <th class="sortable" data-sort="date">Tx Date</th>
+              <th>Filed</th>
+              <th class="sortable" data-sort="member">Member</th>
+              <th class="sortable" data-sort="type">Type</th>
+              <th class="sortable" data-sort="ticker">Ticker</th>
+              <th class="sortable" data-sort="amount">Amount</th>
+              <th class="sortable" data-sort="gain" title="Price change from transaction date to latest close. Click 'Load gains' first.">Gain</th>
+              <th>Asset</th>
+              <th>Copy</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div id="empty" class="empty hidden">No trades yet — hit Refresh to fetch.</div>
+      </section>
+    </div>
+
+    <!-- CONSENSUS TAB -->
+    <div class="tab-pane hidden" data-pane="consensus">
+      <aside>
+        <div class="filter-group">
+          <label class="muted">Window (days)</label>
+          <select id="consensus-window">
+            <option value="7">7 days</option>
+            <option value="14">14 days</option>
+            <option value="30" selected>30 days</option>
+            <option value="90">90 days</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label class="muted">Minimum buyers</label>
+          <select id="consensus-min">
+            <option value="2" selected>2+</option>
+            <option value="3">3+</option>
+            <option value="4">4+</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label class="muted">Direction</label>
+          <select id="consensus-dir">
+            <option value="P" selected>Buys</option>
+            <option value="S">Sells</option>
+            <option value="all">All</option>
+          </select>
+        </div>
+      </aside>
+      <section>
+        <table id="consensus-table">
+          <thead>
+            <tr>
+              <th>Ticker</th><th># Members</th><th>Direction mix</th>
+              <th>Earliest tx</th><th>Latest tx</th><th>Members</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div id="consensus-empty" class="empty hidden">No clustered trades in this window.</div>
+      </section>
+    </div>
+
+    <!-- MEMBERS TAB -->
+    <div class="tab-pane hidden" data-pane="members">
+      <aside class="members-list" id="members-list"></aside>
+      <section class="dossier" id="dossier">
+        <div class="empty">Select a member to view their dossier.</div>
+      </section>
+    </div>
+
+    <!-- PERFORMANCE TAB -->
+    <div class="tab-pane hidden" data-pane="performance">
+      <aside>
+        <div class="filter-group">
+          <label class="muted">Metric</label>
+          <select id="perf-metric">
+            <option value="avg" selected>Avg return on buys (%)</option>
+            <option value="winrate">Win rate (% of buys up)</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label class="muted">Min trades</label>
+          <input id="perf-min" type="number" value="3" />
+        </div>
+        <div class="filter-group">
+          <label class="muted">Notes</label>
+          <div class="muted" style="font-size:11px;line-height:1.5">
+            Computed against Yahoo Finance closing prices.
+            Each buy assumed at transaction-date close, valued at most recent close.
+            Options &amp; assets without tickers excluded.
+          </div>
+        </div>
+      </aside>
+      <section class="perf-section">
+        <div id="perf-status" class="muted" style="padding:12px"></div>
+        <canvas id="perf-chart" width="800" height="500"></canvas>
+      </section>
+    </div>
+
+    <!-- PICKS TAB -->
+    <div class="tab-pane hidden" data-pane="picks">
+      <aside>
+        <div class="filter-group">
+          <label class="muted">Buy window</label>
+          <select id="picks-window">
+            <option value="30">Last 30 days</option>
+            <option value="60" selected>Last 60 days</option>
+            <option value="90">Last 90 days</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label class="muted">How scoring works</label>
+          <div class="muted" style="font-size:11px;line-height:1.6">
+            <b style="color:#c5cad6">+3</b> per distinct buyer (consensus)<br/>
+            <b style="color:#c5cad6">+2×</b> buyer track record (avg return)<br/>
+            <b style="color:#c5cad6">+2</b> freshness of latest buy<br/>
+            <b style="color:#c5cad6">+2</b> if price hasn't run up &gt;5% yet<br/>
+            <b style="color:#c5cad6">−2</b> per member selling it<br/>
+            Options excluded.
+          </div>
+        </div>
+      </aside>
+      <section>
+        <table id="picks-table">
+          <thead>
+            <tr>
+              <th>Rank</th><th>Ticker</th><th>Price US$</th><th>Buyers</th>
+              <th>Sellers</th><th>Last buy</th><th>Run-up</th><th>Buyer avg ret</th>
+              <th>Score</th><th>Who</th><th>Copy</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div id="picks-empty" class="empty">Scoring congressional buys…</div>
+      </section>
+    </div>
+
+    <!-- MY TFSA TAB -->
+    <div class="tab-pane hidden" data-pane="portfolio">
+      <aside>
+        <div class="filter-group">
+          <label class="muted">TFSA budget (CAD)</label>
+          <input id="pf-budget" type="number" value="100" />
+        </div>
+        <div class="filter-group">
+          <label class="muted">Log a buy</label>
+          <input id="pf-ticker" type="text" placeholder="Ticker (e.g. NVDA)" style="margin-bottom:6px" />
+          <input id="pf-cad" type="number" placeholder="Amount CAD" style="margin-bottom:6px" />
+          <input id="pf-date" type="date" style="margin-bottom:6px" />
+          <button id="pf-add" style="width:100%">＋ Add position</button>
+        </div>
+        <div class="filter-group">
+          <label class="muted">Cash</label>
+          <div id="pf-cash" class="stats"></div>
+        </div>
+      </aside>
+      <section class="perf-section">
+        <div id="pf-summary" class="dossier-grid" style="padding:12px 12px 0"></div>
+        <div id="pf-advice" style="padding:0 12px"></div>
+        <div style="padding:12px"><canvas id="pf-chart" width="800" height="300"></canvas></div>
+        <table id="pf-table">
+          <thead>
+            <tr>
+              <th>Ticker</th><th>Buy date</th><th>Cost CA$</th><th>Entry US$</th>
+              <th>Now US$</th><th>Shares</th><th>Value CA$</th><th>P&amp;L</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div id="pf-empty" class="empty hidden">No positions yet — log your first buy on the left.</div>
+      </section>
+    </div>
+  </main>
+
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-body">
+      <h2>Settings</h2>
+      <label>Year</label>
+      <input id="cfg-year" type="number" />
+      <label>Lookback (days)</label>
+      <input id="cfg-lookback" type="number" />
+      <label>Auto-refresh every (minutes, 0 = off)</label>
+      <input id="cfg-autorefresh" type="number" />
+      <label>Per-signal copy amount (CAD)</label>
+      <input id="cfg-amount" type="number" />
+      <label>Watchlist (one last name per line — leave empty to track everyone)</label>
+      <textarea id="cfg-watchlist" rows="8"></textarea>
+      <div class="modal-actions">
+        <button id="reset-state-btn" class="ghost danger">Reset "seen" history</button>
+        <span style="flex:1"></span>
+        <button id="cfg-cancel" class="ghost">Cancel</button>
+        <button id="cfg-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="chart.umd.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

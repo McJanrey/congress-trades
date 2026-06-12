@@ -1,0 +1,43 @@
+{
+  "name": "congress-trades",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "fetch": "node fetch-trades.js",
+    "fetch:all": "node fetch-trades.js --all",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "release": "electron-builder --win --publish always"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "electron-updater": "^6.8.9",
+    "fast-xml-parser": "^4.5.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.mj.congresstrades",
+    "productName": "Congress Trades",
+    "files": [
+      "*.js",
+      "preload.cjs",
+      "parse_ptr.py",
+      "config.json",
+      "renderer/**",
+      "node_modules/**"
+    ],
+    "asarUnpack": [
+      "parse_ptr.py"
+    ],
+    "win": {
+      "target": "nsis",
+      "signAndEditExecutable": false
+    }
+  }
+}

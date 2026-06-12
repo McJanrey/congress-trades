@@ -1,0 +1,24 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('api', {
+  getConfig: () => ipcRenderer.invoke('get-config'),
+  saveConfig: (cfg) => ipcRenderer.invoke('save-config', cfg),
+  listTrades: () => ipcRenderer.invoke('list-trades'),
+  refresh: () => ipcRenderer.invoke('refresh'),
+  openPdf: (url) => ipcRenderer.invoke('open-pdf', url),
+  resetState: () => ipcRenderer.invoke('reset-state'),
+  onProgress: (cb) => ipcRenderer.on('refresh-progress', (_e, msg) => cb(msg)),
+  onTradesUpdated: (cb) => ipcRenderer.on('trades-updated', () => cb()),
+  listMembers: () => ipcRenderer.invoke('list-members'),
+  getMemberDossier: (name) => ipcRenderer.invoke('get-member-dossier', name),
+  computePerformance: (opts) => ipcRenderer.invoke('compute-performance', opts),
+  computeGains: () => ipcRenderer.invoke('compute-gains'),
+  onPerfProgress: (cb) => ipcRenderer.on('perf-progress', (_e, msg) => cb(msg)),
+  portfolioGet: () => ipcRenderer.invoke('portfolio-get'),
+  portfolioSave: (p) => ipcRenderer.invoke('portfolio-save', p),
+  portfolioAdd: (pos) => ipcRenderer.invoke('portfolio-add', pos),
+  portfolioRemove: (id) => ipcRenderer.invoke('portfolio-remove', id),
+  portfolioValue: () => ipcRenderer.invoke('portfolio-value'),
+  computePicks: (opts) => ipcRenderer.invoke('compute-picks', opts),
+  fxRate: () => ipcRenderer.invoke('fx-rate'),
+});

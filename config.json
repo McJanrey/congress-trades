@@ -1,0 +1,10 @@
+{
+  "watchlist": [],
+  "year": 2026,
+  "minTransactionUsd": 15000,
+  "lookbackDays": 180,
+  "autoRefreshMinutes": 60,
+  "refreshOnLaunch": true,
+  "copyTradeAmountCad": 500,
+  "wealthsimpleTradeUrl": "https://my.wealthsimple.com/app/trade"
+}
