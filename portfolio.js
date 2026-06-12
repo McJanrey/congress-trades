@@ -22,6 +22,11 @@ export function loadPortfolio() {
 }
 
 export function savePortfolio(p) {
+  // Keep the previous version as a one-step rollback before every write —
+  // this file is the user's real-money record.
+  try {
+    if (fs.existsSync(FILE)) fs.copyFileSync(FILE, FILE + '.bak');
+  } catch {}
   fs.writeFileSync(FILE, JSON.stringify(p, null, 2));
   return p;
 }

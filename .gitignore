@@ -8,3 +8,4 @@ portfolio.json
 *.zip
 *.log
 __pycache__/
+portfolio.real-tfsa-backup.json
