@@ -668,16 +668,35 @@ function buildAdvice(cashCad, heldTickers) {
 const WS_FX_FEE = 0.015;
 let fxCached = null;
 async function getFx() {
-  if (!fxCached) fxCached = await api.fxRate();
+  if (!fxCached) {
+    try {
+      fxCached = api.fxRate ? await api.fxRate() : 1.37;
+    } catch {
+      fxCached = 1.37; // fallback rate — panel still renders, footer shows it
+    }
+  }
   return fxCached;
 }
 
 async function renderAdvice(cashCad, heldTickers) {
   const el = $('#pf-advice');
+  try {
+    await renderAdviceInner(el, cashCad, heldTickers);
+  } catch (e) {
+    el.innerHTML = `<div class="advice-card"><h3>Suggested buys</h3><div class="muted" style="font-size:12px">Couldn't build suggestions (${e.message}). Will retry on next refresh.</div></div>`;
+  }
+}
+
+async function renderAdviceInner(el, cashCad, heldTickers) {
   // Picks power the advice — compute them if we haven't yet.
-  if (lastPicks.length === 0 && !picksBusy) {
+  if (lastPicks.length === 0) {
     el.innerHTML = '<div class="advice-card"><h3>Suggested buys</h3><div class="muted" style="font-size:12px">Scoring congressional buys…</div></div>';
-    await autoPicks(true);
+    if (picksBusy) {
+      // Another compute is in flight — wait for it rather than racing it.
+      for (let i = 0; i < 60 && picksBusy; i++) await new Promise((r) => setTimeout(r, 1000));
+    } else {
+      await autoPicks(true);
+    }
   }
   const advice = buildAdvice(cashCad, heldTickers);
   if (advice.rows.length === 0) {

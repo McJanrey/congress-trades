@@ -24,6 +24,11 @@
   "build": {
     "appId": "com.mj.congresstrades",
     "productName": "Congress Trades",
+    "publish": {
+      "provider": "github",
+      "owner": "McJanrey",
+      "repo": "congress-trades"
+    },
     "files": [
       "*.js",
       "preload.cjs",
