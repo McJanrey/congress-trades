@@ -17,7 +17,8 @@ export function loadPortfolio() {
   if (!fs.existsSync(FILE)) {
     return { budgetCad: 100, accountType: 'TFSA', positions: [] };
   }
-  return JSON.parse(fs.readFileSync(FILE, 'utf8'));
+  // Strip a UTF-8 BOM if present (Notepad/PowerShell add one).
+  return JSON.parse(fs.readFileSync(FILE, 'utf8').replace(/^﻿/, ''));
 }
 
 export function savePortfolio(p) {
