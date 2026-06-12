@@ -378,6 +378,8 @@ ipcMain.handle('compute-picks', async (event, { windowDays = 60 } = {}) => {
       const rel = await tradeRelevance(m, g.ticker);
       if (rel.relevant) { committee = rel.committee; break; }
     }
+    const secInfo = await sectorFor(g.ticker, SECTOR_CACHE);
+    const otc = !!secInfo.otc;
 
     // Composite score, tuned for "follow deliberate buyers early":
     //  committee relevance is the strongest backtested edge, then
@@ -404,6 +406,7 @@ ipcMain.handle('compute-picks', async (event, { windowDays = 60 } = {}) => {
     else if (runup != null && runup < 0.05) reasons.push('hasn’t run up yet');
     else if (runup != null) reasons.push(`already +${Math.round(runup * 100)}% since entry`);
     if (g.sellers.size > 0) reasons.push(`${g.sellers.size} member(s) selling`);
+    if (otc) reasons.push('⚠ OTC — not TFSA-eligible');
 
     picks.push({
       ticker: g.ticker,
@@ -417,6 +420,7 @@ ipcMain.handle('compute-picks', async (event, { windowDays = 60 } = {}) => {
       avgBuyerReturn: Math.round(avgQuality * 10) / 10,
       conviction: Math.round(conviction * 100) / 100,
       committee,
+      otc,
       reasons,
       score: Math.round(score * 10) / 10,
     });

@@ -581,7 +581,7 @@ function renderPicks(picks) {
     const scoreColor = idx < 5 ? '#22c55e' : idx < 15 ? '#c5cad6' : '#6b7280';
     return `<tr>
       <td class="muted">#${idx + 1}</td>
-      <td class="ticker">${p.ticker}${p.committee ? ` <span title="Committee oversight: ${p.committee} — backtested +2.45%/trade EV" style="cursor:help">🏛</span>` : ''}</td>
+      <td class="ticker">${p.ticker}${p.committee ? ` <span title="Committee oversight: ${p.committee} — backtested +2.45%/trade EV" style="cursor:help">🏛</span>` : ''}${p.otc ? ` <span title="OTC market — not TFSA-eligible" style="cursor:help;color:#f59e0b;font-size:10px">OTC</span>` : ''}</td>
       <td>$${p.price}</td>
       <td><span class="signal-pill signal-${Math.min(p.buyers, 5)}">${p.buyers}</span></td>
       <td>${p.sellers ? `<span style="color:#ef4444">${p.sellers}</span>` : '<span class="muted">0</span>'}</td>
@@ -637,6 +637,7 @@ function buildAdvice(cashCad, heldTickers) {
   for (const pk of lastPicks) {
     if (candidates.length >= 8) break;
     if (heldTickers.has(pk.ticker)) { excluded.push({ ticker: pk.ticker, why: 'already in your TFSA' }); continue; }
+    if (pk.otc) { excluded.push({ ticker: pk.ticker, why: 'OTC — not TFSA-eligible' }); continue; }
     if (pk.sellers > 0) { excluded.push({ ticker: pk.ticker, why: `${pk.sellers} member(s) selling it` }); continue; }
     if (pk.conviction != null && pk.conviction < 0.3) { excluded.push({ ticker: pk.ticker, why: 'managed-account flow, weak intent' }); continue; }
     if (pk.score <= 0) continue;

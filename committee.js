@@ -22,9 +22,14 @@ const COMMITTEE_SECTORS = {
   SSAF: { name: 'Senate Agriculture', match: (s) => /Consumer Defensive|Basic Materials/i.test(s) },
 };
 
+// Yahoo exchange codes for OTC markets (pink sheets, OTCQB, OTCQX) — these are
+// generally NOT TFSA-qualified investments under CRA rules.
+const OTC_EXCHANGES = new Set(['PNK', 'OQB', 'OQX', 'OTC', 'OEM', 'OBB']);
+
 export async function sectorFor(ticker, sectorCache) {
   const cached = sectorCache.get(ticker);
-  if (cached && !sectorCache.isStale(ticker, 30 * 86400_000)) return cached;
+  // 'exchange' missing = entry from an older app version — refetch.
+  if (cached && 'exchange' in cached && !sectorCache.isStale(ticker, 30 * 86400_000)) return cached;
   try {
     const res = await fetch(
       `https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(ticker)}&quotesCount=1&newsCount=0`,
@@ -32,12 +37,17 @@ export async function sectorFor(ticker, sectorCache) {
     );
     const j = await res.json();
     const q = (j.quotes || []).find((x) => x.symbol === ticker) || j.quotes?.[0];
-    const info = { sector: q?.sector || q?.sectorDisp || null, industry: q?.industry || q?.industryDisp || null };
+    const info = {
+      sector: q?.sector || q?.sectorDisp || null,
+      industry: q?.industry || q?.industryDisp || null,
+      exchange: q?.exchange || null,
+      otc: OTC_EXCHANGES.has(q?.exchange),
+    };
     sectorCache.set(ticker, info);
     sectorCache.flush();
     return info;
   } catch {
-    return { sector: null, industry: null };
+    return { sector: null, industry: null, exchange: null, otc: false };
   }
 }
 
