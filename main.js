@@ -66,13 +66,15 @@ function computedFile(name) { return path.join(CACHE_DIR, `computed-${name}.json
 function readComputed(name) {
   try {
     const j = JSON.parse(fs.readFileSync(computedFile(name), 'utf8'));
-    if (Date.now() - j.ts < COMPUTED_TTL) return j.data;
+    // Version-stamped: a new app version means new scoring — never serve
+    // results computed by older code.
+    if (j.v === app.getVersion() && Date.now() - j.ts < COMPUTED_TTL) return j.data;
   } catch {}
   return null;
 }
 function writeComputed(name, data) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
-  fs.writeFileSync(computedFile(name), JSON.stringify({ ts: Date.now(), data }));
+  fs.writeFileSync(computedFile(name), JSON.stringify({ ts: Date.now(), v: app.getVersion(), data }));
 }
 function invalidateComputed() {
   for (const f of ['gains', 'picks-30', 'picks-60', 'picks-90']) {
