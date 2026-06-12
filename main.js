@@ -232,6 +232,19 @@ function scheduleAutoRefresh() {
   console.log(`Auto-refresh scheduled every ${minutes} min.`);
 }
 
+// Exactly one instance: two copies racing on portfolio.json corrupts the
+// user's real-money record. A second launch focuses the existing window.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
 app.whenReady().then(() => {
   createWindow();
   const config = loadConfig(CONFIG_FILE);
