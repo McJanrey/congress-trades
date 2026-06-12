@@ -42,7 +42,7 @@ async function main() {
     console.log(`  ${pdfUrl(config.year, f.docId)}`);
 
     if (NO_PARSE) continue;
-    const r = parsePtr(config.year, f.docId, { scriptDir: __dirname });
+    const r = await parsePtr(config.year, f.docId, { scriptDir: __dirname });
     if (!r.ok) {
       console.log(`  (parse failed: ${r.error})`);
       continue;

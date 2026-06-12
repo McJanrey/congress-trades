@@ -4,7 +4,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import AdmZip from 'adm-zip';
 import { XMLParser } from 'fast-xml-parser';
 
@@ -60,21 +60,27 @@ export function filterFilings(filings, { watchlist = [], lookbackDays = 90 } = {
     .sort((a, b) => new Date(b.filingDate) - new Date(a.filingDate));
 }
 
+// Async so the Electron main process stays responsive during long backfills —
+// a synchronous spawn here blocks the whole app window per PDF.
 export function parsePtr(year, docId, { pythonBin = 'python', scriptDir } = {}) {
-  const script = path.join(scriptDir, 'parse_ptr.py');
-  const url = pdfUrl(year, docId);
-  const result = spawnSync(pythonBin, [script, url, docId], {
-    encoding: 'utf8',
-    maxBuffer: 16 * 1024 * 1024,
+  return new Promise((resolve) => {
+    const script = path.join(scriptDir, 'parse_ptr.py');
+    const url = pdfUrl(year, docId);
+    const child = spawn(pythonBin, [script, url, docId]);
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => resolve({ ok: false, error: e.message }));
+    child.on('close', (code) => {
+      if (code !== 0) return resolve({ ok: false, error: err.trim() || `exit ${code}` });
+      try {
+        resolve({ ok: true, data: JSON.parse(out) });
+      } catch (e) {
+        resolve({ ok: false, error: `invalid JSON: ${e.message}` });
+      }
+    });
   });
-  if (result.status !== 0) {
-    return { ok: false, error: result.stderr?.trim() || `exit ${result.status}` };
-  }
-  try {
-    return { ok: true, data: JSON.parse(result.stdout) };
-  } catch (e) {
-    return { ok: false, error: `invalid JSON: ${e.message}` };
-  }
 }
 
 export function loadState(file) {

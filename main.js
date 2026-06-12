@@ -127,7 +127,7 @@ async function runRefresh({ background = false } = {}) {
         type: 'status',
         text: `[${processed}/${newHits.length}] Parsing ${f.first} ${f.last}...`,
       });
-      const r = parsePtr(f.indexYear || config.year, f.docId, { scriptDir: SCRIPT_DIR });
+      const r = await parsePtr(f.indexYear || config.year, f.docId, { scriptDir: SCRIPT_DIR });
       if (r.ok) {
         fs.writeFileSync(path.join(TRADES_DIR, `${f.docId}.json`), JSON.stringify(r.data, null, 2));
         parsedCount += r.data.transactions.length;
