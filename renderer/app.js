@@ -766,6 +766,140 @@ async function renderAdviceInner(el, cashCad, heldTickers) {
   });
 }
 
+// ---------- Live prices (Yahoo streaming websocket) ----------
+// Push feed used by finance.yahoo.com itself — sub-second updates during
+// market hours, no key. Unofficial; portfolio falls back to hourly closes
+// if it ever breaks.
+let liveWs = null;
+let liveTickers = [];
+const livePrices = {};
+let liveLastTick = 0;
+let liveRenderTimer = null;
+
+function decodeYahooQuote(b64) {
+  // Minimal protobuf decode: field 1 = ticker (string), field 2 = price (float32).
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  let i = 0, id = null, price = null;
+  while (i < bytes.length) {
+    const tag = bytes[i++];
+    const field = tag >> 3, wire = tag & 7;
+    if (wire === 2) {
+      let len = 0, shift = 0, b;
+      do { b = bytes[i++]; len |= (b & 0x7f) << shift; shift += 7; } while (b & 0x80);
+      if (field === 1) id = new TextDecoder().decode(bytes.slice(i, i + len));
+      i += len;
+    } else if (wire === 5) {
+      if (field === 2) price = new DataView(bytes.buffer, bytes.byteOffset + i, 4).getFloat32(0, true);
+      i += 4;
+    } else if (wire === 0) {
+      while (bytes[i++] & 0x80);
+    } else if (wire === 1) { i += 8; }
+    else break;
+  }
+  return { id, price };
+}
+
+function startLiveStream(tickers) {
+  const want = [...new Set(tickers)].sort().join(',');
+  if (liveWs && want === liveTickers.join(',') && liveWs.readyState <= 1) return;
+  liveTickers = [...new Set(tickers)].sort();
+  if (liveWs) { try { liveWs.close(); } catch {} liveWs = null; }
+  if (liveTickers.length === 0) return;
+
+  const ws = new WebSocket('wss://streamer.finance.yahoo.com/');
+  liveWs = ws;
+  ws.onopen = () => ws.send(JSON.stringify({ subscribe: liveTickers }));
+  ws.onmessage = (ev) => {
+    try {
+      let b64 = ev.data;
+      if (typeof b64 === 'string' && b64.startsWith('{')) b64 = JSON.parse(b64).message;
+      const { id, price } = decodeYahooQuote(b64);
+      if (id && price && liveTickers.includes(id)) {
+        livePrices[id] = price;
+        liveLastTick = Date.now();
+        // Throttle DOM updates to once a second.
+        if (!liveRenderTimer) {
+          liveRenderTimer = setTimeout(() => { liveRenderTimer = null; renderHoldings(); }, 1000);
+        }
+      }
+    } catch {}
+  };
+  ws.onclose = () => {
+    // Reconnect after 10s if this stream is still wanted.
+    setTimeout(() => {
+      if (liveWs === ws && liveTickers.length) { liveWs = null; startLiveStream(liveTickers); }
+    }, 10_000);
+  };
+}
+
+let pfLastV = null;
+
+function renderHoldings() {
+  const v = pfLastV;
+  if (!v) return;
+  const fxNow = v.totals.fxNow || 1.37;
+
+  // Apply live overrides on top of the last full valuation.
+  const rows = v.enriched.map((e) => {
+    if (e.error) return e;
+    const lastUsd = livePrices[e.ticker] ?? e.lastUsd;
+    const valueCad = e.shares * lastUsd * fxNow;
+    return { ...e, lastUsd: Math.round(lastUsd * 100) / 100, valueCad: Math.round(valueCad * 100) / 100, plCad: Math.round((valueCad - e.cad) * 100) / 100, plPct: Math.round(((valueCad - e.cad) / e.cad) * 10000) / 100 };
+  });
+
+  const live = Date.now() - liveLastTick < 30_000;
+  const costCad = rows.filter((e) => !e.error).reduce((a, e) => a + e.cad, 0);
+  const valueCad = rows.filter((e) => !e.error).reduce((a, e) => a + e.valueCad, 0);
+  const plCad = valueCad - costCad;
+  const plPct = costCad > 0 ? (plCad / costCad) * 100 : 0;
+  const plColor = plCad >= 0 ? '#22c55e' : '#ef4444';
+  const sign = plCad >= 0 ? '+' : '';
+
+  $('#pf-summary').innerHTML = `
+    <div class="dossier-stat"><div class="label">Value ${live ? '<span style="color:#22c55e">● LIVE</span>' : ''}</div><div class="value">${fmtCad(valueCad)}</div></div>
+    <div class="dossier-stat"><div class="label">Cost</div><div class="value">${fmtCad(costCad)}</div></div>
+    <div class="dossier-stat"><div class="label">P&L</div><div class="value" style="color:${plColor}">${sign}${fmtCad(plCad)}</div></div>
+    <div class="dossier-stat"><div class="label">Return</div><div class="value" style="color:${plColor}">${sign}${plPct.toFixed(2)}%</div></div>
+  `;
+
+  $('#pf-table tbody').innerHTML = rows.map((e) => {
+    if (e.error) {
+      return `<tr><td class="ticker">${e.ticker}</td><td>${e.date}</td><td>${fmtCad(e.cad)}</td>
+        <td colspan="6" class="muted">${e.error}</td>
+        <td><button class="copy-btn" data-remove="${e.id}">✕</button></td></tr>`;
+    }
+    const c = e.plCad >= 0 ? '#22c55e' : '#ef4444';
+    const s = e.plCad >= 0 ? '+' : '';
+    const usdRet = (e.lastUsd - e.entryUsd) / e.entryUsd;
+    const daysHeld = Math.floor((Date.now() - Date.parse(e.date)) / 86400_000);
+    let verdict, vColor;
+    if (usdRet >= 0.05) { verdict = '🎯 SELL — target hit'; vColor = '#22c55e'; }
+    else if (usdRet <= -0.05) { verdict = '🛑 SELL — stop hit'; vColor = '#ef4444'; }
+    else if (daysHeld > 90) { verdict = '⌛ SELL — time up'; vColor = '#f59e0b'; }
+    else { verdict = `HOLD (${daysHeld}d) → $${(e.entryUsd * 1.05).toFixed(2)}`; vColor = '#c5cad6'; }
+    return `<tr>
+      <td class="ticker">${e.ticker}</td>
+      <td>${e.date}</td>
+      <td>${fmtCad(e.cad)}</td>
+      <td>$${e.entryUsd}</td>
+      <td>$${e.lastUsd}${livePrices[e.ticker] ? ' <span style="color:#22c55e;font-size:9px">●</span>' : ''}</td>
+      <td>${e.shares}</td>
+      <td>${fmtCad(e.valueCad)}</td>
+      <td style="color:${c};font-weight:600">${s}${fmtCad(e.plCad)} (${s}${e.plPct}%)</td>
+      <td style="color:${vColor};font-size:12px;font-weight:600" title="Strategy: sell at +5% or −5% on the USD price, or after ~3 months">${verdict}</td>
+      <td><button class="copy-btn" data-remove="${e.id}" title="Remove position">✕</button></td>
+    </tr>`;
+  }).join('');
+
+  $('#pf-table tbody').querySelectorAll('button[data-remove]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      await api.portfolioRemove(b.dataset.remove);
+      showToast('Position removed');
+      refreshPortfolio();
+    });
+  });
+}
+
 async function refreshPortfolio() {
   const p = await api.portfolioGet();
   $('#pf-budget').value = p.budgetCad;
@@ -783,15 +917,7 @@ async function refreshPortfolio() {
 
   const v = await api.portfolioValue();
   const t = v.totals;
-  const plColor = t.plCad >= 0 ? '#22c55e' : '#ef4444';
-  const sign = t.plCad >= 0 ? '+' : '';
-
-  $('#pf-summary').innerHTML = `
-    <div class="dossier-stat"><div class="label">Value</div><div class="value">${fmtCad(t.valueCad)}</div></div>
-    <div class="dossier-stat"><div class="label">Cost</div><div class="value">${fmtCad(t.costCad)}</div></div>
-    <div class="dossier-stat"><div class="label">P&L</div><div class="value" style="color:${plColor}">${sign}${fmtCad(t.plCad)}</div></div>
-    <div class="dossier-stat"><div class="label">Return</div><div class="value" style="color:${plColor}">${sign}${t.plPct}%</div></div>
-  `;
+  pfLastV = v;
 
   $('#pf-cash').innerHTML = `
     <div class="row"><span class="muted">Budget</span><span class="num">${fmtCad(v.budgetCad)}</span></div>
@@ -800,44 +926,8 @@ async function refreshPortfolio() {
     <div class="row"><span class="muted">USD/CAD</span><span class="num">${t.fxNow || '—'}</span></div>
   `;
 
-  $('#pf-table tbody').innerHTML = v.enriched.map((e) => {
-    if (e.error) {
-      return `<tr><td class="ticker">${e.ticker}</td><td>${e.date}</td><td>${fmtCad(e.cad)}</td>
-        <td colspan="6" class="muted">${e.error}</td>
-        <td><button class="copy-btn" data-remove="${e.id}">✕</button></td></tr>`;
-    }
-    const c = e.plCad >= 0 ? '#22c55e' : '#ef4444';
-    const s = e.plCad >= 0 ? '+' : '';
-    // Exit-rule verdict from the backtested strategy: +5% TP / −5% SL / 3m max.
-    const usdRet = (e.lastUsd - e.entryUsd) / e.entryUsd;
-    const daysHeld = Math.floor((Date.now() - Date.parse(e.date)) / 86400_000);
-    let verdict, vColor;
-    if (usdRet >= 0.05) { verdict = '🎯 SELL — target hit'; vColor = '#22c55e'; }
-    else if (usdRet <= -0.05) { verdict = '🛑 SELL — stop hit'; vColor = '#ef4444'; }
-    else if (daysHeld > 90) { verdict = '⌛ SELL — time up'; vColor = '#f59e0b'; }
-    else { verdict = `HOLD (${daysHeld}d) → $${(e.entryUsd * 1.05).toFixed(2)}`; vColor = '#c5cad6'; }
-    return `<tr>
-      <td class="ticker">${e.ticker}</td>
-      <td>${e.date}</td>
-      <td>${fmtCad(e.cad)}</td>
-      <td>$${e.entryUsd}</td>
-      <td>$${e.lastUsd}</td>
-      <td>${e.shares}</td>
-      <td>${fmtCad(e.valueCad)}</td>
-      <td style="color:${c};font-weight:600">${s}${fmtCad(e.plCad)} (${s}${e.plPct}%)</td>
-      <td style="color:${vColor};font-size:12px;font-weight:600" title="Strategy: sell at +5% or −5% on the USD price, or after ~3 months">${verdict}</td>
-      <td><button class="copy-btn" data-remove="${e.id}" title="Remove position">✕</button></td>
-    </tr>`;
-  }).join('');
-
-  $('#pf-table tbody').querySelectorAll('button[data-remove]').forEach((b) => {
-    b.addEventListener('click', async () => {
-      await api.portfolioRemove(b.dataset.remove);
-      showToast('Position removed');
-      refreshPortfolio();
-    });
-  });
-
+  renderHoldings();
+  startLiveStream(v.enriched.filter((e) => !e.error).map((e) => e.ticker));
   renderAdvice(t.cashCad, new Set(v.enriched.map((e) => e.ticker)));
 
   // Value-over-time line chart with a cost baseline.

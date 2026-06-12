@@ -102,9 +102,11 @@ function createWindow() {
 }
 
 function send(channel, payload) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(channel, payload);
-  }
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(channel, payload);
+    }
+  } catch {} // window can be mid-teardown during background work
 }
 
 async function runRefresh({ background = false } = {}) {
