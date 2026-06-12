@@ -930,26 +930,35 @@ async function refreshPortfolio() {
   startLiveStream(v.enriched.filter((e) => !e.error).map((e) => e.ticker));
   renderAdvice(t.cashCad, new Set(v.enriched.map((e) => e.ticker)));
 
-  // Value-over-time line chart with a cost baseline.
+  // Value-over-time line chart with a cost baseline. The timeline has one
+  // point per market day — on day one, seed it with cost-at-buy → value-now
+  // so there's always a line to draw.
+  let labels = v.timeline.map((x) => x.date);
+  let values = v.timeline.map((x) => x.valueCad);
+  if (values.length < 2) {
+    const today = new Date().toISOString().slice(0, 10);
+    labels = [today + ' (buy)', 'now'];
+    values = [t.costCad, t.valueCad];
+  }
   const ctx = $('#pf-chart').getContext('2d');
   if (pfChart) pfChart.destroy();
   pfChart = new Chart(ctx, {
     type: 'line',
     data: {
-      labels: v.timeline.map((x) => x.date),
+      labels,
       datasets: [
         {
           label: 'Portfolio value (CA$)',
-          data: v.timeline.map((x) => x.valueCad),
+          data: values,
           borderColor: '#3a82f7',
           backgroundColor: '#3a82f733',
           fill: true,
           tension: 0.25,
-          pointRadius: 0,
+          pointRadius: values.length < 15 ? 3 : 0,
         },
         {
           label: 'Cost basis',
-          data: v.timeline.map(() => t.costCad),
+          data: values.map(() => t.costCad),
           borderColor: '#6b7280',
           borderDash: [6, 4],
           pointRadius: 0,
