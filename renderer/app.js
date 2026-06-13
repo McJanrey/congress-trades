@@ -912,17 +912,53 @@ function renderHoldings() {
   // Click an entry price to correct it to your real Wealthsimple fill (USD).
   // Blank re-derives from price history; a number freezes that exact basis.
   $('#pf-table tbody').querySelectorAll('button[data-edit-entry]').forEach((b) => {
-    b.addEventListener('click', async () => {
+    b.addEventListener('click', () => {
+      // Electron disables window.prompt, so edit inline instead. Replace the
+      // button with a number input pre-filled with the current basis.
+      const id = b.dataset.editEntry;
       const cur = b.dataset.entry;
-      const input = window.prompt('Your Wealthsimple fill price per share (US$). Leave blank to re-derive from market history.', cur);
-      if (input === null) return; // cancelled
-      const trimmed = input.trim();
-      const val = trimmed === '' ? null : Number(trimmed);
-      if (trimmed !== '' && (!Number.isFinite(val) || val <= 0)) { showToast('Enter a positive number, or blank', 'error'); return; }
-      await api.portfolioSetEntry(b.dataset.editEntry, val);
-      pfLastV = null; // force a full re-valuation against the new basis
-      showToast(trimmed === '' ? 'Entry price re-derived' : 'Entry price updated');
-      refreshPortfolio();
+      const cell = b.parentElement;
+      let done = false;
+
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.step = '0.01';
+      input.value = cur;
+      input.title = 'Your Wealthsimple fill price per share (US$). Leave blank to re-derive from market history.';
+      input.style.cssText = 'width:70px;padding:2px 4px;font:inherit;background:#11151f;color:#e6e8ee;border:1px solid #3b82f6;border-radius:4px';
+      cell.innerHTML = '';
+      cell.appendChild(input);
+      input.focus();
+      input.select();
+
+      const cancel = () => {
+        if (done) return;
+        done = true;
+        renderHoldings(); // restore the button affordance unchanged
+      };
+
+      const commit = async () => {
+        if (done) return;
+        const trimmed = input.value.trim();
+        const val = trimmed === '' ? null : Number(trimmed);
+        if (trimmed !== '' && (!Number.isFinite(val) || val <= 0)) {
+          showToast('Enter a positive number, or blank', 'error');
+          input.focus();
+          input.select();
+          return;
+        }
+        done = true;
+        await api.portfolioSetEntry(id, val);
+        pfLastV = null; // force a full re-valuation against the new basis
+        showToast(trimmed === '' ? 'Entry price re-derived' : 'Entry price updated');
+        refreshPortfolio();
+      };
+
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+        else if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+      });
+      input.addEventListener('blur', commit);
     });
   });
 }
