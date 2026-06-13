@@ -614,9 +614,14 @@ $('#pf-add').addEventListener('click', async () => {
   const ticker = $('#pf-ticker').value.trim().toUpperCase();
   const cad = Number($('#pf-cad').value);
   const date = $('#pf-date').value;
+  const fillRaw = $('#pf-fill').value.trim();
+  const manualEntryUsd = fillRaw ? Number(fillRaw) : null;
   if (!ticker || !cad || cad <= 0 || !date) { showToast('Fill ticker, amount, and date', 'error'); return; }
-  await api.portfolioAdd({ ticker, cad, date });
-  $('#pf-ticker').value = ''; $('#pf-cad').value = '';
+  if (fillRaw && (!Number.isFinite(manualEntryUsd) || manualEntryUsd <= 0)) { showToast('Fill price must be a positive number', 'error'); return; }
+  // manualEntryUsd (if given) is frozen as the cost basis; else the main process
+  // snapshots the market price at log time and freezes that.
+  await api.portfolioAdd({ ticker, cad, date, manualEntryUsd });
+  $('#pf-ticker').value = ''; $('#pf-cad').value = ''; $('#pf-fill').value = '';
   showToast(`${ticker} added`);
   refreshPortfolio();
 });
@@ -879,11 +884,14 @@ function renderHoldings() {
     else if (usdRet <= -0.05) { verdict = '🛑 SELL — stop hit'; vColor = '#ef4444'; }
     else if (daysHeld > 90) { verdict = '⌛ SELL — time up'; vColor = '#f59e0b'; }
     else { verdict = `HOLD (${daysHeld}d) → $${(e.entryUsd * 1.05).toFixed(2)}`; vColor = '#c5cad6'; }
+    const entryTitle = e.entrySource === 'manual'
+      ? 'Your Wealthsimple fill price (frozen). Click to edit.'
+      : 'Cost basis snapshotted at log time. Click to set your real Wealthsimple fill price.';
     return `<tr>
       <td class="ticker">${e.ticker}</td>
       <td>${e.date}</td>
       <td>${fmtCad(e.cad)}</td>
-      <td>$${e.entryUsd}</td>
+      <td><button class="copy-btn" data-edit-entry="${e.id}" data-entry="${e.entryUsd}" title="${entryTitle}" style="padding:2px 6px">$${e.entryUsd}${e.entrySource === 'manual' ? '' : ' ✎'}</button></td>
       <td>$${e.lastUsd}${livePrices[e.ticker] ? ' <span style="color:#22c55e;font-size:9px">●</span>' : ''}</td>
       <td>${e.shares}</td>
       <td>${fmtCad(e.valueCad)}</td>
@@ -897,6 +905,23 @@ function renderHoldings() {
     b.addEventListener('click', async () => {
       await api.portfolioRemove(b.dataset.remove);
       showToast('Position removed');
+      refreshPortfolio();
+    });
+  });
+
+  // Click an entry price to correct it to your real Wealthsimple fill (USD).
+  // Blank re-derives from price history; a number freezes that exact basis.
+  $('#pf-table tbody').querySelectorAll('button[data-edit-entry]').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const cur = b.dataset.entry;
+      const input = window.prompt('Your Wealthsimple fill price per share (US$). Leave blank to re-derive from market history.', cur);
+      if (input === null) return; // cancelled
+      const trimmed = input.trim();
+      const val = trimmed === '' ? null : Number(trimmed);
+      if (trimmed !== '' && (!Number.isFinite(val) || val <= 0)) { showToast('Enter a positive number, or blank', 'error'); return; }
+      await api.portfolioSetEntry(b.dataset.editEntry, val);
+      pfLastV = null; // force a full re-valuation against the new basis
+      showToast(trimmed === '' ? 'Entry price re-derived' : 'Entry price updated');
       refreshPortfolio();
     });
   });

@@ -31,13 +31,76 @@ export function savePortfolio(p) {
   return p;
 }
 
-// position: { id, ticker, cad, date (YYYY-MM-DD), note? }
-// Valuation derives: entry USD price, FX at entry, fractional shares, current value.
+// position: { id, ticker, cad, date (YYYY-MM-DD), note?,
+//             entryUsd (FROZEN cost-basis price), fxAtBuy (FROZEN), entrySource? }
+// entryUsd is the cost basis. It is frozen once — either from the user's real
+// Wealthsimple fill price or from the best price available at log time — and is
+// NEVER recomputed on later valuations (recomputing it drifts the basis up with
+// the live price and pins P&L near 0%). Valuation reads the frozen value.
+
+// Capture the cost-basis price for a position at log time. Returns a patch with
+// frozen entryUsd / fxAtBuy / entrySource. If the caller passed a manual fill
+// price (manualEntryUsd), that wins; otherwise we snapshot the close on/after
+// the buy date, falling back to the latest close for a same-day buy.
+export async function freezeEntry(pos, priceCache) {
+  const earliestTs = Date.parse(pos.date) - 7 * 86400_000;
+  const pr = await fetchSpotAndHistory(pos.ticker.toUpperCase(), earliestTs, priceCache);
+  const fx = await fetchSpotAndHistory('USDCAD=X', earliestTs, priceCache);
+  const fxNow = fx.lastClose || 1.37;
+
+  const manual = Number(pos.manualEntryUsd);
+  let entryUsd = Number.isFinite(manual) && manual > 0 ? manual : null;
+  let entrySource = entryUsd ? 'manual' : null;
+  if (!entryUsd && pr && !pr.error) {
+    const histClose = closeOnOrAfter(pr.series, pos.date);
+    entryUsd = histClose ?? pr.lastClose ?? null;
+    entrySource = histClose ? 'close' : (entryUsd ? 'live' : null);
+  }
+  const fxAtBuy = closeOnOrAfter(fx.series, pos.date) || fxNow;
+
+  const patch = { fxAtBuy: round4(fxAtBuy) };
+  if (entryUsd) {
+    patch.entryUsd = round2(entryUsd);
+    patch.entrySource = entrySource;
+  }
+  // Strip the transient manual hint — it lives on only long enough to freeze.
+  return patch;
+}
+
+// One-time backfill for positions persisted before entry-price freezing
+// existed (or that lack a frozen basis). Mutates p in place and returns true if
+// anything changed (so the caller can persist). Never overwrites an entryUsd
+// the user has already set.
+async function backfillEntries(p, priceCache) {
+  let changed = false;
+  for (const pos of p.positions) {
+    if (pos.entryUsd != null && pos.fxAtBuy != null) continue;
+    const hadFx = pos.fxAtBuy != null;
+    const { manualEntryUsd, ...clean } = pos; // ignore stale hints on stored data
+    const patch = await freezeEntry(clean, priceCache);
+    Object.assign(pos, patch);
+    if (manualEntryUsd != null) delete pos.manualEntryUsd;
+    if (patch.entryUsd != null) {
+      if (!pos.entrySource) pos.entrySource = 'backfill';
+      changed = true; // froze a real basis — worth persisting
+    } else if (!hadFx && patch.fxAtBuy != null) {
+      changed = true; // first-time fx snapshot; entryUsd still pending feed
+    }
+  }
+  return changed;
+}
+
+// Valuation reads the FROZEN entry USD price + FX; only the current price and
+// current FX are live. Backfills+persists any position missing a frozen basis.
 export async function valuePortfolio(priceCache) {
   const p = loadPortfolio();
   if (p.positions.length === 0) {
     return { ...p, totals: { costCad: 0, valueCad: 0, plCad: 0, plPct: 0, cashCad: p.budgetCad }, enriched: [], timeline: [] };
   }
+
+  // Freeze any un-frozen / migrated positions before valuing, then persist so
+  // the basis never drifts again.
+  if (await backfillEntries(p, priceCache)) savePortfolio(p);
 
   const earliest = p.positions.map((x) => x.date).sort()[0];
   const earliestTs = Date.parse(earliest) - 7 * 86400_000;
@@ -53,16 +116,17 @@ export async function valuePortfolio(priceCache) {
   const enriched = [];
   for (const pos of p.positions) {
     const pr = prices[pos.ticker.toUpperCase()];
-    // Same-day buys: no close exists yet for the buy date — fall back to the
-    // most recent close until the market prints one.
-    const entryUsd = pr ? (closeOnOrAfter(pr.series, pos.date) || pr.lastClose) : null;
-    const fxAtBuy = closeOnOrAfter(fx.series, pos.date) || fxNow;
-    if (!entryUsd || !pr.lastClose) {
+    // FROZEN cost basis — read it, never recompute it. (backfillEntries above
+    // guarantees a value unless the price feed was down at log + backfill time,
+    // in which case we leave the position unpriced rather than re-anchor live.)
+    const entryUsd = pos.entryUsd ?? null;
+    const fxAtBuy = pos.fxAtBuy || closeOnOrAfter(fx.series, pos.date) || fxNow;
+    if (!entryUsd || !pr || !pr.lastClose) {
       enriched.push({ ...pos, error: 'no price data' });
       continue;
     }
     const usdSpent = pos.cad / fxAtBuy;
-    const shares = usdSpent / entryUsd;
+    const shares = pos.shares || (usdSpent / entryUsd);
     const valueCad = shares * pr.lastClose * fxNow;
     enriched.push({
       ...pos,

@@ -12,7 +12,7 @@ import electronUpdater from 'electron-updater';
 import { importKadoa, setKadoaTradesDir } from './import-kadoa.js';
 
 const { autoUpdater } = electronUpdater;
-import { loadPortfolio, savePortfolio, valuePortfolio, setPortfolioDir } from './portfolio.js';
+import { loadPortfolio, savePortfolio, valuePortfolio, setPortfolioDir, freezeEntry } from './portfolio.js';
 import { sectorFor, loadCommitteeLookup, checkRelevance } from './committee.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -457,14 +457,40 @@ ipcMain.handle('fx-rate', async () => {
 // ---------- Personal portfolio ----------
 ipcMain.handle('portfolio-get', () => loadPortfolio());
 ipcMain.handle('portfolio-save', (_e, p) => savePortfolio(p));
-ipcMain.handle('portfolio-add', (_e, pos) => {
+ipcMain.handle('portfolio-add', async (_e, pos) => {
   const p = loadPortfolio();
-  p.positions.push({ ...pos, id: `pos_${Date.now()}` });
+  // Freeze the cost-basis price NOW. Uses the user's manual fill price if they
+  // typed one (pos.manualEntryUsd), else snapshots the best price at log time.
+  // entryUsd is persisted and never recomputed on later valuations.
+  const patch = await freezeEntry(pos, PRICE_CACHE);
+  const { manualEntryUsd, ...clean } = pos;
+  p.positions.push({ ...clean, ...patch, id: `pos_${Date.now()}` });
   return savePortfolio(p);
 });
 ipcMain.handle('portfolio-remove', (_e, id) => {
   const p = loadPortfolio();
   p.positions = p.positions.filter((x) => x.id !== id);
+  return savePortfolio(p);
+});
+// Let the user correct a position's frozen entry price to their real WS fill.
+// Passing a positive number overrides the basis; null/0 re-freezes from price
+// history. Marked 'manual' so backfill never silently overwrites it.
+ipcMain.handle('portfolio-set-entry', async (_e, { id, entryUsd }) => {
+  const p = loadPortfolio();
+  const pos = p.positions.find((x) => x.id === id);
+  if (!pos) return p;
+  const v = Number(entryUsd);
+  if (Number.isFinite(v) && v > 0) {
+    pos.entryUsd = Math.round(v * 100) / 100;
+    pos.entrySource = 'manual';
+  } else {
+    // Re-derive from price history (drop the existing basis so freezeEntry runs).
+    delete pos.entryUsd;
+    delete pos.entrySource;
+    const patch = await freezeEntry(pos, PRICE_CACHE);
+    Object.assign(pos, patch);
+    if (pos.entryUsd != null) pos.entrySource = 'close';
+  }
   return savePortfolio(p);
 });
 ipcMain.handle('portfolio-value', () => valuePortfolio(PRICE_CACHE));

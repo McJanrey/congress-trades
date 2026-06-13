@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('api', {
   portfolioSave: (p) => ipcRenderer.invoke('portfolio-save', p),
   portfolioAdd: (pos) => ipcRenderer.invoke('portfolio-add', pos),
   portfolioRemove: (id) => ipcRenderer.invoke('portfolio-remove', id),
+  portfolioSetEntry: (id, entryUsd) => ipcRenderer.invoke('portfolio-set-entry', { id, entryUsd }),
   portfolioValue: () => ipcRenderer.invoke('portfolio-value'),
   computePicks: (opts) => ipcRenderer.invoke('compute-picks', opts),
   fxRate: () => ipcRenderer.invoke('fx-rate'),
